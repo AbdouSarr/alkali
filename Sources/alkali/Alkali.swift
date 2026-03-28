@@ -1,0 +1,479 @@
+//
+//  Alkali.swift
+//  Alkali
+//
+//  Created by Abdou Sarr on 2026-03-28.
+//  Copyright © 2026 Abdou Sarr. All rights reserved.
+//
+
+import Foundation
+import ArgumentParser
+import AlkaliServer
+import AlkaliCodeGraph
+import AlkaliCore
+import AlkaliPreview
+import AlkaliRenderer
+
+@main
+struct AlkaliCLI: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "alkali",
+        abstract: "A reactive bridge between Swift's compiler and your running UI",
+        version: "1.0.0",
+        subcommands: [
+            SetupCommand.self,
+            MCPServerCommand.self,
+            RenderCommand.self,
+            PreviewCommand.self,
+            CatalogCommand.self,
+        ]
+    )
+}
+
+// MARK: - setup
+
+struct SetupCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "setup",
+        abstract: "Configure Alkali as an MCP server in your IDE/agent"
+    )
+
+    @Flag(name: .long, help: "Configure globally (all projects)")
+    var global: Bool = false
+
+    @Option(name: .long, help: "Target a specific client (e.g. claude-code, cursor, vscode, windsurf, kiro, zed, jetbrains, goose, cline, warp, gemini) or 'all'")
+    var client: String?
+
+    @Option(name: .long, help: "Path to the project (defaults to current directory)")
+    var projectRoot: String = "."
+
+    func run() throws {
+        let alkaliPath = resolveAbsolutePath(ProcessInfo.processInfo.arguments[0])
+        let resolvedPath = resolveAbsolutePath(projectRoot)
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let fm = FileManager.default
+
+        let mcpEntry: [String: Any] = [
+            "command": alkaliPath,
+            "args": ["mcp-server", "--project-root", global ? "." : resolvedPath],
+        ]
+
+        // All supported MCP clients and their config file paths
+        let clients: [(name: String, id: String, globalPath: String, projectPath: String?, detector: String?)] = [
+            // Anthropic
+            ("Claude Code",    "claude-code",    "\(home)/.claude/settings.json",
+             "\(resolvedPath)/.claude/settings.json",
+             "\(home)/.claude"),
+            ("Claude Desktop", "claude-desktop", "\(home)/Library/Application Support/Claude/claude_desktop_config.json",
+             nil,
+             "\(home)/Library/Application Support/Claude"),
+            // IDEs
+            ("Cursor",         "cursor",         "\(home)/.cursor/mcp.json",
+             "\(resolvedPath)/.cursor/mcp.json",
+             "\(home)/.cursor"),
+            ("VS Code",        "vscode",         "\(home)/.vscode/mcp.json",
+             "\(resolvedPath)/.vscode/mcp.json",
+             "\(home)/.vscode"),
+            ("Windsurf",       "windsurf",       "\(home)/.codeium/windsurf/mcp_config.json",
+             nil,
+             "\(home)/.codeium/windsurf"),
+            ("Kiro",           "kiro",           "\(home)/.kiro/settings/mcp.json",
+             "\(resolvedPath)/.kiro/settings/mcp.json",
+             "\(home)/.kiro"),
+            ("Zed",            "zed",            "\(home)/.config/zed/settings.json",
+             "\(resolvedPath)/.zed/settings.json",
+             "\(home)/.config/zed"),
+            // JetBrains
+            ("JetBrains",      "jetbrains",      "\(home)/.junie/mcp.json",
+             "\(resolvedPath)/.junie/mcp.json",
+             "\(home)/.junie"),
+            // Agents & CLIs
+            ("Goose",          "goose",          "\(home)/.config/goose/mcp.json",
+             nil,
+             "\(home)/.config/goose"),
+            ("Amp",            "amp",            "\(home)/.config/amp/settings.json",
+             "\(resolvedPath)/.amp/settings.json",
+             "\(home)/.config/amp"),
+            ("Cline",          "cline",          "\(home)/.cline/mcp_settings.json",
+             nil,
+             "\(home)/.cline"),
+            ("Roo Code",       "roo-code",       "\(home)/.roo-code/mcp_settings.json",
+             nil,
+             "\(home)/.roo-code"),
+            ("Continue",       "continue",       "\(home)/.continue/config.json",
+             nil,
+             "\(home)/.continue"),
+            ("Warp",           "warp",           "\(home)/.warp/mcp.json",
+             nil,
+             "\(home)/.warp"),
+            ("Gemini CLI",     "gemini",         "\(home)/.gemini/settings.json",
+             nil,
+             "\(home)/.gemini"),
+        ]
+
+        // Determine which clients to configure
+        let targets: [(name: String, id: String, globalPath: String, projectPath: String?, detector: String?)]
+        if let specific = client {
+            if specific == "all" {
+                targets = clients
+            } else {
+                targets = clients.filter { $0.id == specific }
+                if targets.isEmpty {
+                    let validIDs = clients.map(\.id).joined(separator: ", ")
+                    print("Unknown client: \(specific)")
+                    print("Valid options: \(validIDs), all")
+                    throw ExitCode.failure
+                }
+            }
+        } else {
+            // Auto-detect: find clients that are installed
+            let detected = clients.filter { entry in
+                guard let detector = entry.detector else { return false }
+                return fm.fileExists(atPath: detector)
+            }
+            if detected.isEmpty {
+                print("No MCP clients detected. Use --client to specify one:")
+                for c in clients { print("  alkali setup --client \(c.id)") }
+                print("  alkali setup --client all")
+                return
+            }
+            targets = detected
+        }
+
+        var configured = 0
+        var skipped = 0
+
+        for entry in targets {
+            let settingsFile = global ? entry.globalPath : (entry.projectPath ?? entry.globalPath)
+            let settingsDir = (settingsFile as NSString).deletingLastPathComponent
+
+            try fm.createDirectory(atPath: settingsDir, withIntermediateDirectories: true)
+
+            var settings: [String: Any]
+            if let data = fm.contents(atPath: settingsFile),
+               let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                settings = existing
+            } else {
+                settings = [:]
+            }
+
+            var mcpServers = settings["mcpServers"] as? [String: Any] ?? [:]
+
+            if mcpServers["alkali"] != nil {
+                print("  \(entry.name): already configured")
+                skipped += 1
+                continue
+            }
+
+            mcpServers["alkali"] = mcpEntry
+            settings["mcpServers"] = mcpServers
+
+            let jsonData = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
+            try jsonData.write(to: URL(fileURLWithPath: settingsFile))
+
+            print("  \(entry.name): configured (\(settingsFile))")
+            configured += 1
+        }
+
+        print("")
+        if configured > 0 {
+            print("Alkali configured for \(configured) client\(configured == 1 ? "" : "s").")
+            print("11 MCP tools are now available for querying SwiftUI views,")
+            print("assets, data flow, and project structure.")
+            print("")
+            print("Try asking your AI: \"What views are in this project?\"")
+        } else if skipped > 0 {
+            print("Alkali was already configured in all detected clients.")
+        }
+    }
+}
+
+// MARK: - mcp-server
+
+struct MCPServerCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mcp-server",
+        abstract: "Start the MCP server (JSON-RPC over stdio)"
+    )
+
+    @Option(name: .long, help: "Path to the project root directory")
+    var projectRoot: String = "."
+
+    func run() throws {
+        let path = resolveAbsolutePath(projectRoot)
+        let codeGraph = UnifiedCodeGraph(projectRoot: path)
+        let server = MCPServer(codeGraph: codeGraph)
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            await server.run()
+            semaphore.signal()
+        }
+        semaphore.wait()
+    }
+}
+
+// MARK: - render
+
+struct RenderCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "render",
+        abstract: "Render a SwiftUI view to a PNG image"
+    )
+
+    @Argument(help: "Name of the SwiftUI view to render")
+    var viewName: String
+
+    @Option(name: .long, help: "Device profile name (e.g. 'iPhone 16 Pro')")
+    var device: String = "iPhone 16 Pro"
+
+    @Option(name: .long, help: "Color scheme: light or dark")
+    var scheme: String = "light"
+
+    @Option(name: .long, help: "Output file path")
+    var output: String?
+
+    @Option(name: .long, help: "Path to the project root directory")
+    var projectRoot: String = "."
+
+    func run() throws {
+        let path = resolveAbsolutePath(projectRoot)
+        let codeGraph = UnifiedCodeGraph(projectRoot: path)
+
+        guard let axir = try codeGraph.generateStaticAXIR(for: viewName) else {
+            print("Error: View '\(viewName)' not found in project at \(path)")
+            throw ExitCode.failure
+        }
+
+        let deviceProfile = DeviceProfile.allProfiles.first(where: {
+            $0.name.lowercased().contains(device.lowercased())
+        }) ?? .iPhone16Pro
+
+        let colorScheme: ColorSchemeOverride = scheme == "dark" ? .dark : .light
+        let outputPath = output ?? "\(viewName)_\(deviceProfile.name.replacingOccurrences(of: " ", with: "_"))_\(colorScheme.rawValue).png"
+
+        let axirData = try JSONEncoder().encode(axir)
+        let axirPath = outputPath.replacingOccurrences(of: ".png", with: ".axir.json")
+        try axirData.write(to: URL(fileURLWithPath: axirPath))
+
+        print("View: \(viewName)")
+        print("Device: \(deviceProfile.name)")
+        print("Scheme: \(colorScheme.rawValue)")
+        print("Modifiers: \(axir.modifiers.count)")
+        print("Children: \(axir.allNodes.count) nodes")
+        print("AXIR: \(axirPath)")
+        print("")
+        print("Static AXIR exported. For bitmap rendering, use the MCP server's")
+        print("alkali.preview.render tool with a connected renderer.")
+    }
+}
+
+// MARK: - preview
+
+struct PreviewCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "preview",
+        abstract: "Render all variants of a view (or all views)"
+    )
+
+    @Argument(help: "Name of the SwiftUI view (omit for --all)")
+    var viewName: String?
+
+    @Flag(name: .long, help: "Preview all views in the project")
+    var all: Bool = false
+
+    @Option(name: .long, help: "Variant strategy: auto, full, pairwise")
+    var variants: String = "auto"
+
+    @Option(name: .long, help: "Comma-separated device names")
+    var devices: String?
+
+    @Option(name: .long, help: "Comma-separated color schemes")
+    var schemes: String = "light,dark"
+
+    @Flag(name: .long, help: "Diff against baseline")
+    var diff: Bool = false
+
+    @Flag(name: .long, help: "Set current renders as baseline")
+    var setBaseline: Bool = false
+
+    @Option(name: .long, help: "Output directory")
+    var output: String = "./alkali-previews"
+
+    @Option(name: .long, help: "Path to the project root directory")
+    var projectRoot: String = "."
+
+    func run() throws {
+        let path = resolveAbsolutePath(projectRoot)
+        let codeGraph = UnifiedCodeGraph(projectRoot: path)
+        let catalog = ScreenshotCatalog()
+        let outputDir = resolveAbsolutePath(output)
+
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            do {
+                let views: [ViewDeclaration]
+                if all {
+                    views = try await codeGraph.viewDeclarations(in: nil)
+                } else if let name = viewName {
+                    let allViews = try await codeGraph.viewDeclarations(in: nil)
+                    views = allViews.filter { $0.name == name }
+                    if views.isEmpty {
+                        print("Error: View '\(name)' not found")
+                        semaphore.signal()
+                        return
+                    }
+                } else {
+                    print("Error: Specify a view name or use --all")
+                    semaphore.signal()
+                    return
+                }
+
+                print("Alkali Preview")
+                print("==============")
+                print("Project: \(path)")
+                print("Views: \(views.count)")
+                print("Strategy: \(self.variants)")
+                print("")
+
+                for view in views {
+                    let bindings = try await codeGraph.dataBindings(of: view)
+                    let discovery = VariantDiscovery()
+                    let space = discovery.discover(dataBindings: bindings)
+
+                    let variantInstances: [VariantInstance]
+                    switch self.variants {
+                    case "full":
+                        variantInstances = space.cartesianProduct()
+                    default:
+                        variantInstances = space.pairwiseCoverage()
+                    }
+
+                    let modifiers = try await codeGraph.modifierChain(of: view)
+
+                    print("  \(view.name)")
+                    print("    Source: \(view.sourceLocation)")
+                    print("    Bindings: \(bindings.map { "\($0.bindingKind.rawValue) \($0.property)" }.joined(separator: ", "))")
+                    print("    Modifiers: \(modifiers.count)")
+                    print("    Axes: \(space.axes.map(\.name).joined(separator: ", "))")
+                    print("    Variants: \(variantInstances.count)")
+
+                    if let axir = try codeGraph.generateStaticAXIR(for: view.name) {
+                        for variant in variantInstances {
+                            catalog.add(CatalogEntry(
+                                viewName: view.name,
+                                variant: variant,
+                                imageData: Data(),
+                                axir: axir,
+                                renderTime: 0,
+                                deviceProfile: .iPhone16Pro
+                            ))
+                        }
+                    }
+                    print("")
+                }
+
+                if self.setBaseline {
+                    let baselinePath = resolveAbsolutePath(".alkali-baselines")
+                    let manager = BaselineManager(baselinePath: baselinePath)
+                    for entry in catalog.allEntries() {
+                        try manager.setBaseline(
+                            viewName: entry.viewName,
+                            variant: entry.variant,
+                            imageData: entry.imageData,
+                            axir: entry.axir
+                        )
+                    }
+                    print("Baseline saved to .alkali-baselines/")
+                }
+
+                if self.diff {
+                    let baselinePath = resolveAbsolutePath(".alkali-baselines")
+                    let manager = BaselineManager(baselinePath: baselinePath)
+                    let differ = VisualDiffer()
+                    var driftCount = 0
+                    for entry in catalog.allEntries() {
+                        if let baseline = manager.getBaseline(viewName: entry.viewName, variant: entry.variant) {
+                            let diffs = differ.semanticDiff(old: baseline.axir, new: entry.axir)
+                            if !diffs.isEmpty {
+                                print("  DRIFT: \(entry.viewName) — \(diffs.count) changes")
+                                driftCount += 1
+                            }
+                        }
+                    }
+                    if driftCount == 0 {
+                        print("No visual drift detected.")
+                    }
+                }
+
+                try catalog.exportHTML(to: outputDir)
+                print("Catalog exported to \(outputDir)/index.html")
+
+            } catch {
+                print("Error: \(error)")
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+    }
+}
+
+// MARK: - catalog
+
+struct CatalogCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "catalog",
+        abstract: "Manage the screenshot catalog",
+        subcommands: [CatalogExportCommand.self]
+    )
+}
+
+struct CatalogExportCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "export",
+        abstract: "Export the catalog as HTML"
+    )
+
+    @Option(name: .long, help: "Output directory")
+    var output: String = "./alkali-catalog"
+
+    @Option(name: .long, help: "Path to the project root directory")
+    var projectRoot: String = "."
+
+    func run() throws {
+        let path = resolveAbsolutePath(projectRoot)
+        let codeGraph = UnifiedCodeGraph(projectRoot: path)
+        let catalog = ScreenshotCatalog()
+
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            do {
+                let views = try await codeGraph.viewDeclarations(in: nil)
+                for view in views {
+                    if let axir = try codeGraph.generateStaticAXIR(for: view.name) {
+                        catalog.add(CatalogEntry(
+                            viewName: view.name,
+                            variant: VariantInstance(values: [:]),
+                            imageData: Data(),
+                            axir: axir,
+                            renderTime: 0,
+                            deviceProfile: .iPhone16Pro
+                        ))
+                    }
+                }
+                try catalog.exportHTML(to: resolveAbsolutePath(self.output))
+                print("Exported \(catalog.allEntries().count) views to \(self.output)/index.html")
+            } catch {
+                print("Error: \(error)")
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+    }
+}
+
+// MARK: - Helpers
+
+func resolveAbsolutePath(_ path: String) -> String {
+    if path.hasPrefix("/") { return path }
+    return (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(path)
+}

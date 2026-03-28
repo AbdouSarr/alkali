@@ -1,0 +1,13 @@
+.build/
+.swiftpm/
+.alkali-cache/
+.alkali-baselines/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+.DS_Store
+
+# Internal docs (not for distribution)
+TECHNICAL_SPEC.md
+IMPLEMENTATION_PLAN.md
+CLAUDE.md
