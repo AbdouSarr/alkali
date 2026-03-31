@@ -1,0 +1,110 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get release info
+        id: release
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Download tarball and compute SHA256
+        id: sha
+        run: |
+          TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.release.outputs.tag }}.tar.gz"
+          SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | awk '{print $1}')
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "url=$TARBALL_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: AbdouSarr/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update formula
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          SHA256="${{ steps.sha.outputs.sha256 }}"
+          URL="${{ steps.sha.outputs.url }}"
+
+          cat > Formula/alkali.rb << 'FORMULA'
+          class Alkali < Formula
+            desc "Reactive bridge between Swift's compiler and your running UI"
+            homepage "https://github.com/abdousarr/alkali"
+            url "URL_PLACEHOLDER"
+            sha256 "SHA_PLACEHOLDER"
+            license "MIT"
+
+            head "https://github.com/abdousarr/alkali.git", branch: "master"
+
+            depends_on xcode: ["16.0", :build]
+            depends_on macos: :sonoma
+
+            def install
+              system "swift", "build", "-c", "release", "--disable-sandbox"
+              bin.install ".build/release/alkali"
+            end
+
+            def caveats
+              <<~EOS
+                To configure Alkali with Claude Code, run:
+
+                  alkali setup --global
+
+                Or for a specific project:
+
+                  cd /path/to/your/project
+                  alkali setup
+
+                This adds Alkali as an MCP server so Claude Code can query
+                your SwiftUI views, assets, data flow, and project structure.
+              EOS
+            end
+
+            test do
+              assert_match "VERSION_PLACEHOLDER", shell_output("#{bin}/alkali --version")
+
+              (testpath/"TestView.swift").write <<~SWIFT
+                import SwiftUI
+                struct TestView: View {
+                    @State var count: Int = 0
+                    var body: some View {
+                        VStack {
+                            Text("Hello")
+                                .font(.headline)
+                                .padding(16)
+                            Button("Tap") { count += 1 }
+                        }
+                    }
+                }
+              SWIFT
+
+              output = shell_output("#{bin}/alkali render TestView --project-root #{testpath}")
+              assert_match "TestView", output
+            end
+          end
+          FORMULA
+
+          # Replace placeholders
+          sed -i "s|URL_PLACEHOLDER|${URL}|g" Formula/alkali.rb
+          sed -i "s|SHA_PLACEHOLDER|${SHA256}|g" Formula/alkali.rb
+          sed -i "s|VERSION_PLACEHOLDER|${VERSION}|g" Formula/alkali.rb
+
+          # Fix indentation (remove leading spaces from heredoc)
+          sed -i 's/^          //' Formula/alkali.rb
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/alkali.rb
+          git commit -m "alkali ${{ steps.release.outputs.version }}"
+          git push
