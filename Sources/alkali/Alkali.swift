@@ -19,7 +19,7 @@ struct AlkaliCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "alkali",
         abstract: "A reactive bridge between Swift's compiler and your running UI",
-        version: "1.0.2",
+        version: "1.0.3",
         subcommands: [
             SetupCommand.self,
             MCPServerCommand.self,
@@ -47,72 +47,116 @@ struct SetupCommand: ParsableCommand {
     @Option(name: .long, help: "Path to the project (defaults to current directory)")
     var projectRoot: String = "."
 
+    struct MCPClient {
+        let name: String
+        let id: String
+        let globalPath: String
+        let projectPath: String?
+        let detector: String?
+        let serversKey: String  // JSON key for the MCP servers dictionary
+
+        /// Builds the MCP entry for this client, wrapping if needed (e.g. Zed).
+        func mcpEntry(alkaliPath: String, projectRoot: String) -> [String: Any] {
+            let base: [String: Any] = [
+                "command": alkaliPath,
+                "args": ["mcp-server", "--project-root", projectRoot],
+            ]
+            // Zed wraps command/args inside a "settings" object
+            if id == "zed" {
+                return ["source": "custom", "settings": base]
+            }
+            return base
+        }
+    }
+
     func run() throws {
         let alkaliPath = resolveAbsolutePath(ProcessInfo.processInfo.arguments[0])
         let resolvedPath = resolveAbsolutePath(projectRoot)
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let fm = FileManager.default
 
-        let mcpEntry: [String: Any] = [
-            "command": alkaliPath,
-            "args": ["mcp-server", "--project-root", global ? "." : resolvedPath],
-        ]
+        let projectRootArg = global ? "." : resolvedPath
 
         // All supported MCP clients and their config file paths
-        let clients: [(name: String, id: String, globalPath: String, projectPath: String?, detector: String?)] = [
+        let clients: [MCPClient] = [
             // Anthropic
-            ("Claude Code",    "claude-code",    "\(home)/.claude/settings.json",
-             "\(resolvedPath)/.claude/settings.json",
-             "\(home)/.claude"),
-            ("Claude Desktop", "claude-desktop", "\(home)/Library/Application Support/Claude/claude_desktop_config.json",
-             nil,
-             "\(home)/Library/Application Support/Claude"),
+            .init(name: "Claude Code",    id: "claude-code",
+                  globalPath: "\(home)/.claude/mcp.json",
+                  projectPath: "\(resolvedPath)/.mcp.json",
+                  detector: "\(home)/.claude",
+                  serversKey: "mcpServers"),
+            .init(name: "Claude Desktop", id: "claude-desktop",
+                  globalPath: "\(home)/Library/Application Support/Claude/claude_desktop_config.json",
+                  projectPath: nil,
+                  detector: "\(home)/Library/Application Support/Claude",
+                  serversKey: "mcpServers"),
             // IDEs
-            ("Cursor",         "cursor",         "\(home)/.cursor/mcp.json",
-             "\(resolvedPath)/.cursor/mcp.json",
-             "\(home)/.cursor"),
-            ("VS Code",        "vscode",         "\(home)/.vscode/mcp.json",
-             "\(resolvedPath)/.vscode/mcp.json",
-             "\(home)/.vscode"),
-            ("Windsurf",       "windsurf",       "\(home)/.codeium/windsurf/mcp_config.json",
-             nil,
-             "\(home)/.codeium/windsurf"),
-            ("Kiro",           "kiro",           "\(home)/.kiro/settings/mcp.json",
-             "\(resolvedPath)/.kiro/settings/mcp.json",
-             "\(home)/.kiro"),
-            ("Zed",            "zed",            "\(home)/.config/zed/settings.json",
-             "\(resolvedPath)/.zed/settings.json",
-             "\(home)/.config/zed"),
+            .init(name: "Cursor",         id: "cursor",
+                  globalPath: "\(home)/.cursor/mcp.json",
+                  projectPath: "\(resolvedPath)/.cursor/mcp.json",
+                  detector: "\(home)/.cursor",
+                  serversKey: "mcpServers"),
+            .init(name: "VS Code",        id: "vscode",
+                  globalPath: "\(home)/.vscode/mcp.json",
+                  projectPath: "\(resolvedPath)/.vscode/mcp.json",
+                  detector: "\(home)/.vscode",
+                  serversKey: "servers"),
+            .init(name: "Windsurf",       id: "windsurf",
+                  globalPath: "\(home)/.codeium/windsurf/mcp_config.json",
+                  projectPath: nil,
+                  detector: "\(home)/.codeium/windsurf",
+                  serversKey: "mcpServers"),
+            .init(name: "Kiro",           id: "kiro",
+                  globalPath: "\(home)/.kiro/settings/mcp.json",
+                  projectPath: "\(resolvedPath)/.kiro/settings/mcp.json",
+                  detector: "\(home)/.kiro",
+                  serversKey: "mcpServers"),
+            .init(name: "Zed",            id: "zed",
+                  globalPath: "\(home)/.config/zed/settings.json",
+                  projectPath: "\(resolvedPath)/.zed/settings.json",
+                  detector: "\(home)/.config/zed",
+                  serversKey: "context_servers"),
             // JetBrains
-            ("JetBrains",      "jetbrains",      "\(home)/.junie/mcp.json",
-             "\(resolvedPath)/.junie/mcp.json",
-             "\(home)/.junie"),
+            .init(name: "JetBrains",      id: "jetbrains",
+                  globalPath: "\(home)/.junie/mcp.json",
+                  projectPath: "\(resolvedPath)/.junie/mcp.json",
+                  detector: "\(home)/.junie",
+                  serversKey: "mcpServers"),
             // Agents & CLIs
-            ("Goose",          "goose",          "\(home)/.config/goose/mcp.json",
-             nil,
-             "\(home)/.config/goose"),
-            ("Amp",            "amp",            "\(home)/.config/amp/settings.json",
-             "\(resolvedPath)/.amp/settings.json",
-             "\(home)/.config/amp"),
-            ("Cline",          "cline",          "\(home)/.cline/mcp_settings.json",
-             nil,
-             "\(home)/.cline"),
-            ("Roo Code",       "roo-code",       "\(home)/.roo-code/mcp_settings.json",
-             nil,
-             "\(home)/.roo-code"),
-            ("Continue",       "continue",       "\(home)/.continue/config.json",
-             nil,
-             "\(home)/.continue"),
-            ("Warp",           "warp",           "\(home)/.warp/mcp.json",
-             nil,
-             "\(home)/.warp"),
-            ("Gemini CLI",     "gemini",         "\(home)/.gemini/settings.json",
-             nil,
-             "\(home)/.gemini"),
+            .init(name: "Goose",          id: "goose",
+                  globalPath: "\(home)/.config/goose/mcp.json",
+                  projectPath: nil,
+                  detector: "\(home)/.config/goose",
+                  serversKey: "mcpServers"),
+            .init(name: "Amp",            id: "amp",
+                  globalPath: "\(home)/.config/amp/settings.json",
+                  projectPath: "\(resolvedPath)/.amp/settings.json",
+                  detector: "\(home)/.config/amp",
+                  serversKey: "mcpServers"),
+            .init(name: "Cline",          id: "cline",
+                  globalPath: "\(home)/.cline/mcp_settings.json",
+                  projectPath: nil,
+                  detector: "\(home)/.cline",
+                  serversKey: "mcpServers"),
+            .init(name: "Roo Code",       id: "roo-code",
+                  globalPath: "\(home)/.roo-code/mcp_settings.json",
+                  projectPath: nil,
+                  detector: "\(home)/.roo-code",
+                  serversKey: "mcpServers"),
+            .init(name: "Warp",           id: "warp",
+                  globalPath: "\(home)/.warp/mcp.json",
+                  projectPath: nil,
+                  detector: "\(home)/.warp",
+                  serversKey: "mcpServers"),
+            .init(name: "Gemini CLI",     id: "gemini",
+                  globalPath: "\(home)/.gemini/settings.json",
+                  projectPath: nil,
+                  detector: "\(home)/.gemini",
+                  serversKey: "mcpServers"),
         ]
 
         // Determine which clients to configure
-        let targets: [(name: String, id: String, globalPath: String, projectPath: String?, detector: String?)]
+        let targets: [MCPClient]
         if let specific = client {
             if specific == "all" {
                 targets = clients
@@ -157,16 +201,16 @@ struct SetupCommand: ParsableCommand {
                 settings = [:]
             }
 
-            var mcpServers = settings["mcpServers"] as? [String: Any] ?? [:]
+            var servers = settings[entry.serversKey] as? [String: Any] ?? [:]
 
-            if mcpServers["alkali"] != nil {
+            if servers["alkali"] != nil {
                 print("  \(entry.name): already configured")
                 skipped += 1
                 continue
             }
 
-            mcpServers["alkali"] = mcpEntry
-            settings["mcpServers"] = mcpServers
+            servers["alkali"] = entry.mcpEntry(alkaliPath: alkaliPath, projectRoot: projectRootArg)
+            settings[entry.serversKey] = servers
 
             let jsonData = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
             try jsonData.write(to: URL(fileURLWithPath: settingsFile))
@@ -474,6 +518,6 @@ struct CatalogExportCommand: ParsableCommand {
 // MARK: - Helpers
 
 func resolveAbsolutePath(_ path: String) -> String {
-    if path.hasPrefix("/") { return path }
-    return (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(path)
+    if path.hasPrefix("/") { return (path as NSString).standardizingPath }
+    return ((FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(path) as NSString).standardizingPath
 }
