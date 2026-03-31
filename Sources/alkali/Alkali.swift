@@ -19,7 +19,7 @@ struct AlkaliCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "alkali",
         abstract: "A reactive bridge between Swift's compiler and your running UI",
-        version: "1.0.4",
+        version: "1.0.5",
         subcommands: [
             SetupCommand.self,
             MCPServerCommand.self,
@@ -52,8 +52,41 @@ struct SetupCommand: ParsableCommand {
         let id: String
         let globalPath: String
         let projectPath: String?
-        let detector: String?
+        let detectors: [Detector]
         let serversKey: String  // JSON key for the MCP servers dictionary
+
+        enum Detector {
+            case directory(String)   // config directory exists
+            case app(String)         // .app bundle in /Applications
+            case binary(String)      // executable in $PATH or specific path
+        }
+
+        func isInstalled(fm: FileManager) -> Bool {
+            for detector in detectors {
+                switch detector {
+                case .directory(let path):
+                    if fm.fileExists(atPath: path) { return true }
+                case .app(let name):
+                    let paths = [
+                        "/Applications/\(name).app",
+                        "\(fm.homeDirectoryForCurrentUser.path)/Applications/\(name).app",
+                    ]
+                    if paths.contains(where: { fm.fileExists(atPath: $0) }) { return true }
+                case .binary(let name):
+                    if name.hasPrefix("/") {
+                        if fm.isExecutableFile(atPath: name) { return true }
+                    } else {
+                        // Check $PATH
+                        let pathDirs = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+                            .split(separator: ":").map(String.init)
+                        if pathDirs.contains(where: { fm.isExecutableFile(atPath: "\($0)/\(name)") }) {
+                            return true
+                        }
+                    }
+                }
+            }
+            return false
+        }
 
         /// Builds the MCP entry for this client, wrapping if needed (e.g. Zed).
         func mcpEntry(alkaliPath: String, projectRoot: String) -> [String: Any] {
@@ -83,75 +116,75 @@ struct SetupCommand: ParsableCommand {
             .init(name: "Claude Code",    id: "claude-code",
                   globalPath: "\(home)/.claude/mcp.json",
                   projectPath: "\(resolvedPath)/.mcp.json",
-                  detector: "\(home)/.claude",
+                  detectors: [.binary("claude")],
                   serversKey: "mcpServers"),
             .init(name: "Claude Desktop", id: "claude-desktop",
                   globalPath: "\(home)/Library/Application Support/Claude/claude_desktop_config.json",
                   projectPath: nil,
-                  detector: "\(home)/Library/Application Support/Claude",
+                  detectors: [.app("Claude")],
                   serversKey: "mcpServers"),
             // IDEs
             .init(name: "Cursor",         id: "cursor",
                   globalPath: "\(home)/.cursor/mcp.json",
                   projectPath: "\(resolvedPath)/.cursor/mcp.json",
-                  detector: "\(home)/.cursor",
+                  detectors: [.app("Cursor")],
                   serversKey: "mcpServers"),
             .init(name: "VS Code",        id: "vscode",
                   globalPath: "\(home)/.vscode/mcp.json",
                   projectPath: "\(resolvedPath)/.vscode/mcp.json",
-                  detector: "\(home)/.vscode",
+                  detectors: [.app("Visual Studio Code"), .binary("code")],
                   serversKey: "servers"),
             .init(name: "Windsurf",       id: "windsurf",
                   globalPath: "\(home)/.codeium/windsurf/mcp_config.json",
                   projectPath: nil,
-                  detector: "\(home)/.codeium/windsurf",
+                  detectors: [.app("Windsurf")],
                   serversKey: "mcpServers"),
             .init(name: "Kiro",           id: "kiro",
                   globalPath: "\(home)/.kiro/settings/mcp.json",
                   projectPath: "\(resolvedPath)/.kiro/settings/mcp.json",
-                  detector: "\(home)/.kiro",
+                  detectors: [.app("Kiro")],
                   serversKey: "mcpServers"),
             .init(name: "Zed",            id: "zed",
                   globalPath: "\(home)/.config/zed/settings.json",
                   projectPath: "\(resolvedPath)/.zed/settings.json",
-                  detector: "\(home)/.config/zed",
+                  detectors: [.app("Zed"), .binary("zed")],
                   serversKey: "context_servers"),
             // JetBrains
             .init(name: "JetBrains",      id: "jetbrains",
                   globalPath: "\(home)/.junie/mcp.json",
                   projectPath: "\(resolvedPath)/.junie/mcp.json",
-                  detector: "\(home)/.junie",
+                  detectors: [.app("IntelliJ IDEA"), .app("AppCode"), .app("WebStorm"), .directory("\(home)/.junie")],
                   serversKey: "mcpServers"),
             // Agents & CLIs
             .init(name: "Goose",          id: "goose",
                   globalPath: "\(home)/.config/goose/mcp.json",
                   projectPath: nil,
-                  detector: "\(home)/.config/goose",
+                  detectors: [.binary("goose")],
                   serversKey: "mcpServers"),
             .init(name: "Amp",            id: "amp",
                   globalPath: "\(home)/.config/amp/settings.json",
                   projectPath: "\(resolvedPath)/.amp/settings.json",
-                  detector: "\(home)/.config/amp",
+                  detectors: [.binary("amp")],
                   serversKey: "mcpServers"),
             .init(name: "Cline",          id: "cline",
                   globalPath: "\(home)/.cline/mcp_settings.json",
                   projectPath: nil,
-                  detector: "\(home)/.cline",
+                  detectors: [.directory("\(home)/.cline")],
                   serversKey: "mcpServers"),
             .init(name: "Roo Code",       id: "roo-code",
                   globalPath: "\(home)/.roo-code/mcp_settings.json",
                   projectPath: nil,
-                  detector: "\(home)/.roo-code",
+                  detectors: [.directory("\(home)/.roo-code")],
                   serversKey: "mcpServers"),
             .init(name: "Warp",           id: "warp",
                   globalPath: "\(home)/.warp/mcp.json",
                   projectPath: nil,
-                  detector: "\(home)/.warp",
+                  detectors: [.app("Warp"), .binary("warp")],
                   serversKey: "mcpServers"),
             .init(name: "Gemini CLI",     id: "gemini",
                   globalPath: "\(home)/.gemini/settings.json",
                   projectPath: nil,
-                  detector: "\(home)/.gemini",
+                  detectors: [.binary("gemini")],
                   serversKey: "mcpServers"),
         ]
 
@@ -170,11 +203,8 @@ struct SetupCommand: ParsableCommand {
                 }
             }
         } else {
-            // Auto-detect: find clients that are installed
-            let detected = clients.filter { entry in
-                guard let detector = entry.detector else { return false }
-                return fm.fileExists(atPath: detector)
-            }
+            // Auto-detect: find clients that are actually installed
+            let detected = clients.filter { $0.isInstalled(fm: fm) }
             if detected.isEmpty {
                 print("No MCP clients detected. Use --client to specify one:")
                 for c in clients { print("  alkali setup --client \(c.id)") }

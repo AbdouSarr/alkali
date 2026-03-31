@@ -175,14 +175,20 @@ public final class MCPServer: @unchecked Sendable {
     }
 
     private func tool(_ name: String, _ desc: String, _ props: [String: [String: Any]]) -> [String: Any] {
-        var schema: [String: Any] = ["type": "object", "properties": props]
-        let required = props.filter { $0.value["required"] as? Bool == true }.map(\.key)
+        let required = props.filter { $0.value["_required"] as? Bool == true }.map(\.key)
+        // Strip the internal _required marker from property definitions
+        let cleanProps = props.mapValues { prop in
+            var clean = prop
+            clean.removeValue(forKey: "_required")
+            return clean
+        }
+        var schema: [String: Any] = ["type": "object", "properties": cleanProps]
         if !required.isEmpty { schema["required"] = required }
         return ["name": name, "description": desc, "inputSchema": schema]
     }
 
     private func opt(_ type: String) -> [String: Any] { ["type": type] }
-    private func req(_ type: String) -> [String: Any] { ["type": type, "required": true] }
+    private func req(_ type: String) -> [String: Any] { ["type": type, "_required": true] }
 
     private func makeResponse(id: Any?, result: [String: Any]) -> String {
         var response: [String: Any] = ["jsonrpc": "2.0", "result": result]
