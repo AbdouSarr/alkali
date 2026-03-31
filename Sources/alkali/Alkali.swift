@@ -19,7 +19,7 @@ struct AlkaliCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "alkali",
         abstract: "A reactive bridge between Swift's compiler and your running UI",
-        version: "1.0.3",
+        version: "1.0.4",
         subcommands: [
             SetupCommand.self,
             MCPServerCommand.self,

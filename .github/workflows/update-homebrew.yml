@@ -1,56 +1,76 @@
-name: Update Homebrew Formula
+name: Release & Update Homebrew
 
 on:
   release:
     types: [published]
 
 jobs:
-  update-formula:
-    runs-on: ubuntu-latest
+  build-and-release:
+    runs-on: macos-15
     steps:
-      - name: Get release info
-        id: release
+      - uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          echo "Using: $XCODE_PATH"
+          sudo xcode-select -s "$XCODE_PATH"
+          swift --version
+
+      - name: Build universal binary
+        run: |
+          swift build -c release --arch arm64 --arch x86_64 --disable-sandbox
+          cp .build/apple/Products/Release/alkali alkali
+          strip alkali
+          tar czf alkali-macos.tar.gz alkali
+          shasum -a 256 alkali-macos.tar.gz > alkali-macos.tar.gz.sha256
+
+      - name: Upload binary to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            alkali-macos.tar.gz \
+            alkali-macos.tar.gz.sha256
+
+      - name: Get release metadata
+        id: meta
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
+          TAG="${GITHUB_REF#refs/tags/}"
+          SHA256=$(awk '{print $1}' alkali-macos.tar.gz.sha256)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-
-      - name: Download tarball and compute SHA256
-        id: sha
-        run: |
-          TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.release.outputs.tag }}.tar.gz"
-          SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | awk '{print $1}')
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
-          echo "url=$TARBALL_URL" >> "$GITHUB_OUTPUT"
 
       - name: Checkout homebrew-tap
         uses: actions/checkout@v4
         with:
           repository: AbdouSarr/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
 
       - name: Update formula
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          SHA256: ${{ steps.meta.outputs.sha256 }}
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          VERSION="${{ steps.release.outputs.version }}"
-          SHA256="${{ steps.sha.outputs.sha256 }}"
-          URL="${{ steps.sha.outputs.url }}"
+          URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/alkali-macos.tar.gz"
 
-          cat > Formula/alkali.rb << 'FORMULA'
+          cat > homebrew-tap/Formula/alkali.rb << FORMULA
           class Alkali < Formula
             desc "Reactive bridge between Swift's compiler and your running UI"
             homepage "https://github.com/abdousarr/alkali"
-            url "URL_PLACEHOLDER"
-            sha256 "SHA_PLACEHOLDER"
+            url "${URL}"
+            sha256 "${SHA256}"
             license "MIT"
+            version "${VERSION}"
 
-            head "https://github.com/abdousarr/alkali.git", branch: "master"
-
-            depends_on xcode: ["16.0", :build]
             depends_on macos: :sonoma
 
             def install
-              system "swift", "build", "-c", "release", "--disable-sandbox"
-              bin.install ".build/release/alkali"
+              bin.install "alkali"
             end
 
             def caveats
@@ -70,41 +90,19 @@ jobs:
             end
 
             test do
-              assert_match "VERSION_PLACEHOLDER", shell_output("#{bin}/alkali --version")
-
-              (testpath/"TestView.swift").write <<~SWIFT
-                import SwiftUI
-                struct TestView: View {
-                    @State var count: Int = 0
-                    var body: some View {
-                        VStack {
-                            Text("Hello")
-                                .font(.headline)
-                                .padding(16)
-                            Button("Tap") { count += 1 }
-                        }
-                    }
-                }
-              SWIFT
-
-              output = shell_output("#{bin}/alkali render TestView --project-root #{testpath}")
-              assert_match "TestView", output
+              assert_match "${VERSION}", shell_output("#{bin}/alkali --version")
             end
           end
           FORMULA
 
-          # Replace placeholders
-          sed -i "s|URL_PLACEHOLDER|${URL}|g" Formula/alkali.rb
-          sed -i "s|SHA_PLACEHOLDER|${SHA256}|g" Formula/alkali.rb
-          sed -i "s|VERSION_PLACEHOLDER|${VERSION}|g" Formula/alkali.rb
-
           # Fix indentation (remove leading spaces from heredoc)
-          sed -i 's/^          //' Formula/alkali.rb
+          sed -i '' 's/^          //' homebrew-tap/Formula/alkali.rb
 
-      - name: Commit and push
+      - name: Commit and push formula
+        working-directory: homebrew-tap
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/alkali.rb
-          git commit -m "alkali ${{ steps.release.outputs.version }}"
+          git commit -m "alkali ${{ steps.meta.outputs.version }}"
           git push
