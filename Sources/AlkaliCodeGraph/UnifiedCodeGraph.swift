@@ -13,7 +13,7 @@ import AlkaliCore
 
 /// Unified Code Graph combining SwiftSyntax analysis, project parsing, and asset catalog parsing.
 public final class UnifiedCodeGraph: CodeGraphQuerying, @unchecked Sendable {
-    private let projectRoot: String
+    public let projectRoot: String
     private let bodyAnalyzer = BodyAnalyzer()
     private let assetParser = AssetCatalogParser()
     private let axirGenerator = StaticAXIRGenerator()

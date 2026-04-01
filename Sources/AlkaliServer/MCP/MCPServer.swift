@@ -21,6 +21,13 @@ public final class MCPServer: @unchecked Sendable {
         self.eventLog = eventLog
     }
 
+    /// Project root used to make file paths relative.
+    private var projectRoot: String {
+        var root = codeGraph.projectRoot
+        if !root.hasSuffix("/") { root += "/" }
+        return root
+    }
+
     public func run() async {
         while isRunning {
             guard let line = readLine(strippingNewline: true) else { break }
@@ -53,7 +60,7 @@ public final class MCPServer: @unchecked Sendable {
             return makeResponse(id: id, result: [
                 "protocolVersion": "2024-11-05",
                 "capabilities": ["tools": ["listChanged": false]],
-                "serverInfo": ["name": "alkali", "version": "0.1.0"]
+                "serverInfo": ["name": "alkali", "version": "1.0.6"]
             ])
         case "tools/list":
             return makeResponse(id: id, result: ["tools": toolDefinitions()])
@@ -69,27 +76,51 @@ public final class MCPServer: @unchecked Sendable {
         }
     }
 
+    // MARK: - Path Helpers
+
+    private func relativePath(_ absolutePath: String) -> String {
+        if absolutePath.hasPrefix(projectRoot) {
+            return String(absolutePath.dropFirst(projectRoot.count))
+        }
+        return absolutePath
+    }
+
+    // MARK: - Tool Dispatch
+
     private func callTool(name: String, arguments: [String: Any]) async throws -> String {
         switch name {
         // Code Graph tools
         case "alkali.codeGraph.findViews":
             let target = arguments["target"] as? String
             let views = try await codeGraph.viewDeclarations(in: target)
-            return try encodeJSON(views)
+            let format = arguments["format"] as? String ?? "compact"
+            if format == "json" {
+                return try encodeJSON(views)
+            }
+            return formatViewList(views)
 
         case "alkali.codeGraph.viewStructure":
             let viewName = arguments["viewName"] as? String ?? ""
-            if let axir = try codeGraph.generateStaticAXIR(for: viewName) {
+            guard let axir = try codeGraph.generateStaticAXIR(for: viewName) else {
+                return "View '\(viewName)' not found."
+            }
+            let format = arguments["format"] as? String ?? "tree"
+            if format == "json" {
                 return try encodeJSON(axir)
             }
-            return "{\"error\": \"View not found\"}"
+            return formatAXIRTree(axir)
 
         case "alkali.codeGraph.assetColors":
-            return try encodeJSON(codeGraph.allColors())
+            let colors = try codeGraph.allColors()
+            return formatColorAssets(colors)
 
         case "alkali.codeGraph.assetUsages":
             let assetName = arguments["assetName"] as? String ?? ""
-            return try encodeJSON(try await codeGraph.viewsReferencing(asset: assetName))
+            let views = try await codeGraph.viewsReferencing(asset: assetName)
+            if views.isEmpty {
+                return "No views reference asset '\(assetName)'."
+            }
+            return formatViewList(views)
 
         case "alkali.codeGraph.targets":
             return try encodeJSON(try codeGraph.parsedTargets())
@@ -153,30 +184,192 @@ public final class MCPServer: @unchecked Sendable {
         }
     }
 
+    // MARK: - Compact Formatters
+
+    /// Formats a view list as compact text grouped by directory.
+    private func formatViewList(_ views: [ViewDeclaration]) -> String {
+        var groups: [(dir: String, entries: [(name: String, location: String)])] = []
+        var currentDir = ""
+        var currentEntries: [(name: String, location: String)] = []
+
+        let sorted = views.sorted { relativePath($0.sourceLocation.file) < relativePath($1.sourceLocation.file) }
+
+        for view in sorted {
+            let rel = relativePath(view.sourceLocation.file)
+            let dir = (rel as NSString).deletingLastPathComponent
+            let filename = (rel as NSString).lastPathComponent
+
+            if dir != currentDir {
+                if !currentEntries.isEmpty {
+                    groups.append((dir: currentDir, entries: currentEntries))
+                }
+                currentDir = dir
+                currentEntries = []
+            }
+            currentEntries.append((name: view.name, location: "\(filename):\(view.sourceLocation.line)"))
+        }
+        if !currentEntries.isEmpty {
+            groups.append((dir: currentDir, entries: currentEntries))
+        }
+
+        var lines: [String] = ["\(views.count) views found:\n"]
+
+        for group in groups {
+            lines.append("[\(group.dir)]")
+            for entry in group.entries {
+                let padded = entry.name.padding(toLength: 40, withPad: " ", startingAt: 0)
+                lines.append("  \(padded) \(entry.location)")
+            }
+            lines.append("")
+        }
+
+        let viewsWithBindings = views.filter { !$0.dataBindings.isEmpty }
+        if !viewsWithBindings.isEmpty {
+            lines.append("Views with data bindings: \(viewsWithBindings.map(\.name).joined(separator: ", "))")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    /// Formats an AXIR tree as an indented text tree.
+    private func formatAXIRTree(_ node: AXIRNode, indent: String = "", isLast: Bool = true) -> String {
+        let connector = indent.isEmpty ? "" : (isLast ? "└── " : "├── ")
+        let childIndent = indent.isEmpty ? "" : (indent + (isLast ? "    " : "│   "))
+
+        var line = "\(indent)\(connector)\(node.viewType)"
+
+        // Source location (compact — last path component only)
+        if let loc = node.sourceLocation {
+            let filename = (relativePath(loc.file) as NSString).lastPathComponent
+            line += "  (\(filename):\(loc.line))"
+        }
+
+        // Modifiers (inline, compact)
+        let meaningfulModifiers = node.modifiers.filter { $0.type != .unknown }
+        if !meaningfulModifiers.isEmpty {
+            let modStrs = meaningfulModifiers.map { mod in
+                var s = ".\(mod.type.rawValue)"
+                let params = mod.parameters.compactMap { _, val in
+                    formatAXIRValueCompact(val)
+                }
+                if !params.isEmpty {
+                    s += "(\(params.joined(separator: ", ")))"
+                }
+                return s
+            }
+            line += "  \(modStrs.joined(separator: " "))"
+        }
+
+        // Data bindings
+        if !node.dataBindings.isEmpty {
+            let bindStrs = node.dataBindings.map { "@\($0.bindingKind.rawValue) \($0.property)" }
+            line += "  [\(bindStrs.joined(separator: ", "))]"
+        }
+
+        var result = line
+
+        for (i, child) in node.children.enumerated() {
+            let childIsLast = i == node.children.count - 1
+            result += "\n" + formatAXIRTree(child, indent: childIndent, isLast: childIsLast)
+        }
+
+        return result
+    }
+
+    private func formatAXIRValueCompact(_ value: AXIRValue) -> String? {
+        switch value {
+        case .string(let s): return s
+        case .int(let i): return "\(i)"
+        case .float(let f): return String(format: "%.1f", f)
+        case .bool(let b): return "\(b)"
+        case .enumCase(_, let caseName): return ".\(caseName)"
+        case .binding(let prop, _): return "$\(prop)"
+        case .environment(let key): return "@Environment(\(key))"
+        case .edgeInsets(let t, let l, let b, let tr):
+            return "EdgeInsets(\(t), \(l), \(b), \(tr))"
+        case .size(let w, let h): return "\(w)x\(h)"
+        case .color(let c): return "rgba(\(c.red), \(c.green), \(c.blue), \(c.alpha))"
+        case .assetReference(_, let name): return "\"\(name)\""
+        case .array(let arr): return "[\(arr.count) items]"
+        case .point(let x, let y): return "(\(x), \(y))"
+        case .null: return nil
+        }
+    }
+
+    /// Formats color assets compactly.
+    private func formatColorAssets(_ colors: [ColorAsset]) -> String {
+        if colors.isEmpty { return "No color assets found." }
+
+        var lines: [String] = ["\(colors.count) color assets:\n"]
+        for color in colors.sorted(by: { $0.name < $1.name }) {
+            var line = "  \(color.name)"
+            if !color.appearances.isEmpty {
+                let variants = color.appearances.map { key, val in
+                    "\(key): rgba(\(String(format: "%.2f", val.red)), \(String(format: "%.2f", val.green)), \(String(format: "%.2f", val.blue)), \(String(format: "%.2f", val.alpha)))"
+                }.joined(separator: " | ")
+                line += "  [\(variants)]"
+            }
+            if color.gamut != .sRGB {
+                line += "  (\(color.gamut.rawValue))"
+            }
+            lines.append(line)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: - JSON Encoding
+
     private func encodeJSON<T: Encodable>(_ value: T) throws -> String {
         let data = try JSONEncoder().encode(value)
         return String(data: data, encoding: .utf8) ?? "null"
     }
 
+    // MARK: - Tool Definitions
+
     private func toolDefinitions() -> [[String: Any]] {
         [
-            tool("alkali.codeGraph.findViews", "Find all SwiftUI View declarations", ["target": opt("string")]),
-            tool("alkali.codeGraph.viewStructure", "Get AXIR tree of a view", ["viewName": req("string")]),
-            tool("alkali.codeGraph.assetColors", "List all color assets", [:]),
-            tool("alkali.codeGraph.assetUsages", "Find views referencing an asset", ["assetName": req("string")]),
-            tool("alkali.codeGraph.targets", "List all project targets", [:]),
-            tool("alkali.codeGraph.buildSettings", "Get build settings for a target", ["target": req("string"), "configuration": opt("string")]),
-            tool("alkali.codeGraph.dependencies", "Get target dependency graph", [:]),
-            tool("alkali.events.query", "Query events by filter", ["kinds": opt("array"), "limit": opt("integer")]),
-            tool("alkali.events.causalChain", "Trace causal chain from an event", ["eventId": req("string")]),
-            tool("alkali.dataFlow.dependencies", "Get data dependencies of a view", ["viewName": req("string")]),
-            tool("alkali.dataFlow.bindingChain", "Trace a binding to its @State origin", ["property": req("string")]),
+            tool("alkali.codeGraph.findViews",
+                 "Find all SwiftUI View declarations in the project. Returns a compact list grouped by directory with view name and file:line. Use format='json' for full details including data bindings.",
+                 ["target": opt("string", "Filter to a specific target name"),
+                  "format": opt("string", "Output format: 'compact' (default, text) or 'json' (full details)")]),
+            tool("alkali.codeGraph.viewStructure",
+                 "Get the view tree (AXIR) of a named SwiftUI view — shows the hierarchy of child views, modifiers, and data bindings as an indented tree. Use format='json' for raw AXIR.",
+                 ["viewName": req("string", "Exact name of the SwiftUI View struct"),
+                  "format": opt("string", "Output format: 'tree' (default, indented text) or 'json' (raw AXIR)")]),
+            tool("alkali.codeGraph.assetColors",
+                 "List all color assets from xcassets catalogs with their light/dark RGBA values.",
+                 [:]),
+            tool("alkali.codeGraph.assetUsages",
+                 "Find which SwiftUI views reference a named asset (color, image, or symbol).",
+                 ["assetName": req("string", "The asset name to search for")]),
+            tool("alkali.codeGraph.targets",
+                 "List all Xcode targets in the project (app, framework, test, etc.).",
+                 [:]),
+            tool("alkali.codeGraph.buildSettings",
+                 "Get Xcode build settings for a target. Returns key-value pairs like SWIFT_VERSION, IPHONEOS_DEPLOYMENT_TARGET, etc.",
+                 ["target": req("string", "Target name"),
+                  "configuration": opt("string", "Build configuration: 'Debug' (default) or 'Release'")]),
+            tool("alkali.codeGraph.dependencies",
+                 "Get the target dependency graph — which targets depend on which.",
+                 [:]),
+            tool("alkali.events.query",
+                 "Query the event log by kind and time range.",
+                 ["kinds": opt("array", "Event kinds to filter by"),
+                  "limit": opt("integer", "Max number of events to return")]),
+            tool("alkali.events.causalChain",
+                 "Trace the causal chain from a specific event back to its root cause.",
+                 ["eventId": req("string", "UUID of the event to trace")]),
+            tool("alkali.dataFlow.dependencies",
+                 "Get the data dependencies of a SwiftUI view — what @State, @Binding, @Environment, @Observable properties it reads or writes.",
+                 ["viewName": req("string", "Exact name of the SwiftUI View struct")]),
+            tool("alkali.dataFlow.bindingChain",
+                 "Trace a @Binding property back to its @State origin through the view hierarchy.",
+                 ["property": req("string", "The property name to trace")]),
         ]
     }
 
     private func tool(_ name: String, _ desc: String, _ props: [String: [String: Any]]) -> [String: Any] {
         let required = props.filter { $0.value["_required"] as? Bool == true }.map(\.key)
-        // Strip the internal _required marker from property definitions
         let cleanProps = props.mapValues { prop in
             var clean = prop
             clean.removeValue(forKey: "_required")
@@ -187,8 +380,19 @@ public final class MCPServer: @unchecked Sendable {
         return ["name": name, "description": desc, "inputSchema": schema]
     }
 
-    private func opt(_ type: String) -> [String: Any] { ["type": type] }
-    private func req(_ type: String) -> [String: Any] { ["type": type, "_required": true] }
+    private func opt(_ type: String, _ description: String? = nil) -> [String: Any] {
+        var d: [String: Any] = ["type": type]
+        if let description { d["description"] = description }
+        return d
+    }
+
+    private func req(_ type: String, _ description: String? = nil) -> [String: Any] {
+        var d: [String: Any] = ["type": type, "_required": true]
+        if let description { d["description"] = description }
+        return d
+    }
+
+    // MARK: - JSON-RPC Helpers
 
     private func makeResponse(id: Any?, result: [String: Any]) -> String {
         var response: [String: Any] = ["jsonrpc": "2.0", "result": result]
