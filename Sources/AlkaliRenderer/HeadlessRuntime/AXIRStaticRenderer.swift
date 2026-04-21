@@ -99,18 +99,21 @@ public final class AXIRStaticRenderer: Sendable {
         ctx.setLineWidth(0.5)
         ctx.strokePath()
 
-        // Label the node with its viewType (small text in corner).
-        drawLabel(node.viewType, in: frame, ctx: ctx, colorScheme: colorScheme)
+        // Draw content: text wins, then image, then (only if neither) the type marker.
+        let hasText = node.modifiers.contains { $0.type == .text }
+        let hasImage = node.modifiers.contains { $0.type == .image }
 
-        // Text content (UILabel / UIButton / IB text).
-        if let textMod = node.modifiers.first(where: { $0.type == .text }),
+        if hasText, let textMod = node.modifiers.first(where: { $0.type == .text }),
            case .string(let text)? = textMod.parameters["value"] {
             drawText(text, in: frame, ctx: ctx, colorScheme: colorScheme, large: true)
-        }
-
-        // Image content — draw a diagonal marker so we can see where images go.
-        if node.modifiers.contains(where: { $0.type == .image }) {
+        } else if hasImage {
             drawImagePlaceholder(in: frame, ctx: ctx, colorScheme: colorScheme)
+        } else if frame.width > 60 && frame.height > 18 {
+            // Only label container-ish nodes, and suppress the repetitive "UI" prefix for clarity.
+            let marker = typeMarker(for: node.viewType)
+            if !marker.isEmpty {
+                drawLabel(marker, in: frame, ctx: ctx, colorScheme: colorScheme)
+            }
         }
 
         // Recurse into children.
@@ -247,6 +250,17 @@ public final class AXIRStaticRenderer: Sendable {
     private func drawLabel(_ text: String, in frame: CGRect, ctx: CGContext, colorScheme: AXIRColorScheme) {
         guard frame.size.width > 40 && frame.size.height > 12 else { return }
         drawText(text, in: frame.insetBy(dx: 4, dy: 2), ctx: ctx, colorScheme: colorScheme, large: false, alignTop: true)
+    }
+
+    /// Returns a short type marker suitable for placing as a soft label on a container node.
+    /// Returns an empty string for boilerplate container types we don't want to label.
+    private func typeMarker(for viewType: String) -> String {
+        // Don't label the generic base types — they're noise.
+        let suppressed: Set<String> = ["UIView", "View", "ZStack", "VStack", "HStack", "Group"]
+        if suppressed.contains(viewType) { return "" }
+        // Strip common prefixes for brevity.
+        if viewType.hasPrefix("UI") && viewType.count > 2 { return String(viewType.dropFirst(2)) }
+        return viewType
     }
 
     private func drawText(_ text: String, in frame: CGRect, ctx: CGContext, colorScheme: AXIRColorScheme, large: Bool, alignTop: Bool = false) {

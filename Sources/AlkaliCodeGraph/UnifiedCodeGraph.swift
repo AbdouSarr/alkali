@@ -327,7 +327,7 @@ public final class UnifiedCodeGraph: CodeGraphQuerying, @unchecked Sendable {
             let ibParser = InterfaceBuilderParser()
 
             if let ibPath = findIBFile(forViewNamed: viewName, sourceFile: view.sourceLocation.file),
-               let hierarchy = ibParser.extractHierarchy(from: ibPath) {
+               let hierarchy = ibParser.extractHierarchy(from: ibPath, matchingCustomClass: viewName) {
                 return ibGen.generate(viewName: viewName, sourceFile: ibPath, root: hierarchy)
             }
 

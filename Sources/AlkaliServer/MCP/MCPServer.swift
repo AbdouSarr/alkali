@@ -289,9 +289,7 @@ public final class MCPServer: @unchecked Sendable {
         if !meaningfulModifiers.isEmpty {
             let modStrs = meaningfulModifiers.map { mod in
                 var s = ".\(mod.type.rawValue)"
-                let params = mod.parameters.compactMap { _, val in
-                    formatAXIRValueCompact(val)
-                }
+                let params = orderedParams(for: mod)
                 if !params.isEmpty {
                     s += "(\(params.joined(separator: ", ")))"
                 }
@@ -314,6 +312,33 @@ public final class MCPServer: @unchecked Sendable {
         }
 
         return result
+    }
+
+    /// Returns parameter strings in a deterministic order, grouped by the modifier type
+    /// so nothing depends on dictionary iteration order.
+    private func orderedParams(for mod: AXIRModifier) -> [String] {
+        // Known geometric orderings — extend as needed.
+        let keyOrder: [ModifierType: [String]] = [
+            .ibFrame:   ["x", "y", "width", "height"],
+            .frame:     ["width", "height"],
+            .offset:    ["x", "y"],
+            .position:  ["x", "y"],
+            .padding:   ["top", "leading", "bottom", "trailing"]
+        ]
+        let preferred = keyOrder[mod.type] ?? []
+
+        var out: [String] = []
+        var consumed: Set<String> = []
+        for key in preferred {
+            if let value = mod.parameters[key], let s = formatAXIRValueCompact(value) {
+                out.append(s); consumed.insert(key)
+            }
+        }
+        // Anything left — sorted alphabetically for determinism.
+        for key in mod.parameters.keys.sorted() where !consumed.contains(key) {
+            if let s = formatAXIRValueCompact(mod.parameters[key]!) { out.append(s) }
+        }
+        return out
     }
 
     private func formatAXIRValueCompact(_ value: AXIRValue) -> String? {

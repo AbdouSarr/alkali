@@ -36,14 +36,40 @@ public final class InterfaceBuilderParser: NSObject, Sendable {
         return handler.entries
     }
 
-    /// Returns an IB view-hierarchy tree suitable for rendering as AXIR.
+    /// Returns an IB view-hierarchy tree. For .xib files, returns the single root.
+    /// For .storyboard files, returns the first scene's root (use `extractHierarchy(from:matchingCustomClass:)`
+    /// to target a specific scene by its customClass).
     public func extractHierarchy(from path: String) -> IBViewNode? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        return extractHierarchies(from: path).first
+    }
+
+    /// Returns a specific scene matching a customClass name. Searches the scene's entire
+    /// descendant tree for the customClass, then returns that scene's root view.
+    /// If no match, returns the first scene (safe fallback).
+    public func extractHierarchy(from path: String, matchingCustomClass targetClass: String) -> IBViewNode? {
+        let scenes = extractHierarchies(from: path)
+        for scene in scenes {
+            if sceneContains(node: scene, customClass: targetClass) {
+                return scene
+            }
+        }
+        return scenes.first
+    }
+
+    /// Returns every top-level scene's root view. For an .xib, this is a single-element array.
+    /// For a .storyboard, it's one element per `<scene>`.
+    public func extractHierarchies(from path: String) -> [IBViewNode] {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return [] }
         let handler = HierarchyHandler()
         let parser = XMLParser(data: data)
         parser.delegate = handler
         parser.parse()
-        return handler.root
+        return handler.allScenes
+    }
+
+    private func sceneContains(node: IBViewNode, customClass: String) -> Bool {
+        if node.customClass == customClass { return true }
+        return node.children.contains { sceneContains(node: $0, customClass: customClass) }
     }
 }
 
@@ -138,7 +164,11 @@ private final class CustomClassHandler: NSObject, XMLParserDelegate {
 }
 
 private final class HierarchyHandler: NSObject, XMLParserDelegate {
-    var root: IBViewNode?
+    /// Every top-level scene root (xib: 1, storyboard: N).
+    var allScenes: [IBViewNode] = []
+    /// Convenience alias — first scene.
+    var root: IBViewNode? { allScenes.first }
+
     private var stack: [MutableIBNode] = []
     // The outermost "objects" container is not a rendered view — skip it.
     private var insideObjects = false
@@ -200,7 +230,8 @@ private final class HierarchyHandler: NSObject, XMLParserDelegate {
             parent.children.append(finished)
             stack.append(parent)
         } else {
-            if root == nil { root = finished }
+            // This is a top-level scene root — accumulate instead of only keeping the first.
+            allScenes.append(finished)
         }
     }
 }
