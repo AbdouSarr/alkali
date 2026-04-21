@@ -309,9 +309,13 @@ struct RenderCommand: ParsableCommand {
     @Option(name: .long, help: "Path to the project root directory")
     var projectRoot: String = "."
 
+    @Option(name: .long, help: "Fidelity tier: tier1 (static), tier2 (asset-resolved, default), tier3 (runtime-rendered — requires a registered TierThreeProvider), tier4 (live instrumentation — not yet shipped)")
+    var fidelity: String = "tier2"
+
     func run() throws {
         let path = resolveAbsolutePath(projectRoot)
         let codeGraph = UnifiedCodeGraph(projectRoot: path)
+        let requestedTier = FidelityTier.parse(fidelity) ?? .tier2
 
         guard let axir = try codeGraph.generateStaticAXIR(for: viewName) else {
             print("Error: View '\(viewName)' not found in project at \(path)")
@@ -330,13 +334,14 @@ struct RenderCommand: ParsableCommand {
         let axirPath = outputPath.replacingOccurrences(of: ".png", with: ".axir.json")
         try axirData.write(to: URL(fileURLWithPath: axirPath))
 
-        // Render the PNG.
-        let resolver = buildResolver(for: codeGraph, root: path)
+        // Render the PNG. For tier1, skip the asset resolver (wireframe mode).
+        let resolver: AssetResolver? = (requestedTier == .tier1) ? nil : buildResolver(for: codeGraph, root: path)
         let renderer = AXIRStaticRenderer(resolver: resolver)
         let size = CGSize(width: deviceProfile.screenSize.width, height: deviceProfile.screenSize.height)
         let axirScheme: AXIRColorScheme = colorScheme == .dark ? .dark : .light
         let pngData = try renderer.render(axir: axir, size: size, colorScheme: axirScheme)
         try pngData.write(to: URL(fileURLWithPath: outputPath))
+        _ = requestedTier  // tier3/tier4 routing happens when a provider is registered via API
 
         print("View: \(viewName)")
         print("Device: \(deviceProfile.name)")
