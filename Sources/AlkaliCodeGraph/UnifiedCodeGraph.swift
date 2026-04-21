@@ -432,6 +432,22 @@ public final class UnifiedCodeGraph: CodeGraphQuerying, @unchecked Sendable {
         SymbolTableBuilder().build(from: swiftFiles)
     }
 
+    /// Builds a `StateSeeder` by combining:
+    /// - user overrides from `.alkali-state.json` at the project root,
+    /// - source-level default initializers for `@State`/`@Published`/`let`/`var`,
+    /// - fixtures mined from `#Preview { }` and `static var sample` patterns.
+    public func stateSeeder() -> UnifiedStateSeeder {
+        let extractor = StateExtractor()
+        let defaults = extractor.extractSourceDefaults(from: swiftFiles)
+        let fixtures = extractor.extractFixtures(from: swiftFiles)
+        let overrides = UnifiedStateSeeder.loadOverrides(fromProjectRoot: projectRoot)
+        return UnifiedStateSeeder(
+            overrides: overrides,
+            sourceDefaults: defaults,
+            fixtures: fixtures
+        )
+    }
+
     // MARK: - Helpers
 
     private func analyzeAllViews() throws -> [AnalyzedView] {

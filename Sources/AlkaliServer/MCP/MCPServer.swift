@@ -180,6 +180,15 @@ public final class MCPServer: @unchecked Sendable {
             }
             return "{\"result\": null}"
 
+        case "alkali.state.seed":
+            let viewName = arguments["viewName"] as? String ?? ""
+            let seeder = codeGraph.stateSeeder()
+            let seeds = seeder.seed(for: viewName)
+            let jsonReady: [String: Any] = Dictionary(uniqueKeysWithValues: seeds.map { ($0.key, $0.value.jsonObject) })
+            let payload: [String: Any] = ["viewName": viewName, "bindings": jsonReady]
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+            return String(data: data, encoding: .utf8) ?? "{}"
+
         // Preview tool — renders a view's AXIR to a PNG.
         case "alkali.preview.render":
             let viewName = arguments["viewName"] as? String ?? ""
@@ -439,6 +448,9 @@ public final class MCPServer: @unchecked Sendable {
             tool("alkali.dataFlow.bindingChain",
                  "Trace a @Binding property back to its @State origin through the view hierarchy.",
                  ["property": req("string", "The property name to trace")]),
+            tool("alkali.state.seed",
+                 "Return plausible values for a view's @State / @Published / @Binding / let / var properties. Merges .alkali-state.json overrides, #Preview-mined fixtures, and source-level initializer defaults.",
+                 ["viewName": req("string", "The view name to seed")]),
             tool("alkali.preview.render",
                  "Render a view's static AXIR to a PNG file on disk. Works for SwiftUI (schematic layout from modifier hints) and UIKit (geometrically accurate when the view is defined in an .xib or .storyboard).",
                  ["viewName": req("string", "The view name to render"),
