@@ -331,7 +331,8 @@ struct RenderCommand: ParsableCommand {
         try axirData.write(to: URL(fileURLWithPath: axirPath))
 
         // Render the PNG.
-        let renderer = AXIRStaticRenderer()
+        let resolver = buildResolver(for: codeGraph, root: path)
+        let renderer = AXIRStaticRenderer(resolver: resolver)
         let size = CGSize(width: deviceProfile.screenSize.width, height: deviceProfile.screenSize.height)
         let axirScheme: AXIRColorScheme = colorScheme == .dark ? .dark : .light
         let pngData = try renderer.render(axir: axir, size: size, colorScheme: axirScheme)
@@ -438,7 +439,8 @@ struct PreviewCommand: ParsableCommand {
                     print("    Variants: \(variantInstances.count)")
 
                     if let axir = try codeGraph.generateStaticAXIR(for: view.name) {
-                        let renderer = AXIRStaticRenderer()
+                        let resolver = buildResolver(for: codeGraph, root: path)
+                        let renderer = AXIRStaticRenderer(resolver: resolver)
                         let size = CGSize(width: DeviceProfile.iPhone16Pro.screenSize.width,
                                           height: DeviceProfile.iPhone16Pro.screenSize.height)
                         for variant in variantInstances {
@@ -537,7 +539,8 @@ struct CatalogExportCommand: ParsableCommand {
         Task {
             do {
                 let views = try await codeGraph.viewDeclarations(in: nil)
-                let renderer = AXIRStaticRenderer()
+                let resolver = buildResolver(for: codeGraph, root: path)
+                let renderer = AXIRStaticRenderer(resolver: resolver)
                 let size = CGSize(width: DeviceProfile.iPhone16Pro.screenSize.width,
                                   height: DeviceProfile.iPhone16Pro.screenSize.height)
                 for view in views {
@@ -571,4 +574,17 @@ struct CatalogExportCommand: ParsableCommand {
 func resolveAbsolutePath(_ path: String) -> String {
     if path.hasPrefix("/") { return (path as NSString).standardizingPath }
     return ((FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(path) as NSString).standardizingPath
+}
+
+/// Build a resolver primed from everything the code graph discovered plus fonts walked from the project root.
+func buildResolver(for codeGraph: UnifiedCodeGraph, root: String) -> UnifiedAssetResolver {
+    let colors = (try? codeGraph.allColors()) ?? []
+    let imagePaths = (try? codeGraph.imagePathsByName()) ?? [:]
+    let table = codeGraph.colorSymbolTable()
+    return UnifiedAssetResolver.forProject(
+        root: root,
+        colors: colors,
+        imagePathsByName: imagePaths,
+        colorSymbolTokens: table.colorsByDottedName
+    )
 }

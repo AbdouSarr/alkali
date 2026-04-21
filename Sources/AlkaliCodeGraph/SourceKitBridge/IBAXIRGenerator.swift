@@ -41,7 +41,14 @@ public struct IBAXIRGenerator: Sendable {
                 sourceLocation: fallbackLocation
             ))
         }
-        if let hex = node.backgroundColorHex {
+        // Prefer a named color over a hex literal so the resolver can do light/dark + asset lookup.
+        if let named = node.backgroundColorName {
+            modifiers.append(AXIRModifier(
+                type: .backgroundColor,
+                parameters: ["name": .assetReference(catalog: "", name: named)],
+                sourceLocation: fallbackLocation
+            ))
+        } else if let hex = node.backgroundColorHex {
             modifiers.append(AXIRModifier(
                 type: .backgroundColor,
                 parameters: ["hex": .string(hex)],
@@ -56,9 +63,13 @@ public struct IBAXIRGenerator: Sendable {
             ))
         }
         if let image = node.imageName {
+            let key = node.imageIsSystem ? "systemName" : "name"
+            let value: AXIRValue = node.imageIsSystem
+                ? .string(image)
+                : .assetReference(catalog: "", name: image)
             modifiers.append(AXIRModifier(
                 type: .image,
-                parameters: ["name": .assetReference(catalog: "", name: image)],
+                parameters: [key: value],
                 sourceLocation: fallbackLocation
             ))
         }

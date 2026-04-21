@@ -80,8 +80,10 @@ public struct IBViewNode: Sendable, Codable, Hashable {
     public let identifier: String?
     public let frame: IBRect?
     public let backgroundColorHex: String?
+    public let backgroundColorName: String?  // named asset-catalog color or system color key
     public let text: String?         // label text / button title
     public let imageName: String?    // UIImage(named:) from IB
+    public let imageIsSystem: Bool   // SF Symbol — `catalog="system"` in XML
     public let children: [IBViewNode]
 
     public init(
@@ -90,8 +92,10 @@ public struct IBViewNode: Sendable, Codable, Hashable {
         identifier: String? = nil,
         frame: IBRect? = nil,
         backgroundColorHex: String? = nil,
+        backgroundColorName: String? = nil,
         text: String? = nil,
         imageName: String? = nil,
+        imageIsSystem: Bool = false,
         children: [IBViewNode] = []
     ) {
         self.elementType = elementType
@@ -99,8 +103,10 @@ public struct IBViewNode: Sendable, Codable, Hashable {
         self.identifier = identifier
         self.frame = frame
         self.backgroundColorHex = backgroundColorHex
+        self.backgroundColorName = backgroundColorName
         self.text = text
         self.imageName = imageName
+        self.imageIsSystem = imageIsSystem
         self.children = children
     }
 }
@@ -186,17 +192,16 @@ private final class HierarchyHandler: NSObject, XMLParserDelegate {
         if elementName == "objects" { insideObjects = true; return }
 
         if viewElements.contains(elementName) {
-            var rect: IBRect? = nil
-            // Rect info usually comes as a sibling <rect ...> tag; we'll assign below.
-            _ = rect
             let node = MutableIBNode(
                 elementType: elementName,
                 customClass: attr["customClass"],
                 identifier: attr["id"] ?? attr["restorationIdentifier"],
                 frame: nil,
                 backgroundColorHex: nil,
+                backgroundColorName: nil,
                 text: attr["text"] ?? attr["title"],
                 imageName: attr["image"],
+                imageIsSystem: false,
                 children: []
             )
             stack.append(node)
@@ -211,11 +216,28 @@ private final class HierarchyHandler: NSObject, XMLParserDelegate {
         } else if elementName == "color" {
             guard var top = stack.popLast() else { return }
             if attr["key"] == "backgroundColor" {
-                if let r = Double(attr["red"] ?? ""), let g = Double(attr["green"] ?? ""),
+                // Named asset-catalog color.
+                if let named = attr["name"] {
+                    top.backgroundColorName = named
+                }
+                // RGB literal.
+                else if let r = Double(attr["red"] ?? ""), let g = Double(attr["green"] ?? ""),
                    let b = Double(attr["blue"] ?? ""), let a = Double(attr["alpha"] ?? "1.0") {
                     top.backgroundColorHex = String(format: "#%02X%02X%02X%02X",
                         Int(r * 255), Int(g * 255), Int(b * 255), Int(a * 255))
                 }
+                // Named system color (e.g. "systemBackground").
+                else if let sys = attr["systemColor"] ?? attr["cocoaTouchSystemColor"] {
+                    top.backgroundColorName = sys
+                }
+            }
+            stack.append(top)
+        } else if elementName == "image" {
+            guard var top = stack.popLast() else { return }
+            // Image asset inside an imageView: <image name="x" catalog="system"/>
+            if let name = attr["name"] {
+                top.imageName = name
+                top.imageIsSystem = attr["catalog"] == "system"
             }
             stack.append(top)
         }
@@ -242,8 +264,10 @@ private struct MutableIBNode {
     var identifier: String?
     var frame: IBRect?
     var backgroundColorHex: String?
+    var backgroundColorName: String?
     var text: String?
     var imageName: String?
+    var imageIsSystem: Bool = false
     var children: [IBViewNode]
 
     func frozen() -> IBViewNode {
@@ -253,8 +277,10 @@ private struct MutableIBNode {
             identifier: identifier,
             frame: frame,
             backgroundColorHex: backgroundColorHex,
+            backgroundColorName: backgroundColorName,
             text: text,
             imageName: imageName,
+            imageIsSystem: imageIsSystem,
             children: children
         )
     }

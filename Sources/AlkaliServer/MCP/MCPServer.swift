@@ -194,7 +194,16 @@ public final class MCPServer: @unchecked Sendable {
                 $0.name.lowercased().contains(deviceName.lowercased())
             }) ?? .iPhone16Pro
             let axirScheme: AXIRColorScheme = (scheme == "dark") ? .dark : .light
-            let renderer = AXIRStaticRenderer()
+            let colors = (try? codeGraph.allColors()) ?? []
+            let imagePaths = (try? codeGraph.imagePathsByName()) ?? [:]
+            let table = codeGraph.colorSymbolTable()
+            let resolver = UnifiedAssetResolver.forProject(
+                root: codeGraph.projectRoot,
+                colors: colors,
+                imagePathsByName: imagePaths,
+                colorSymbolTokens: table.colorsByDottedName
+            )
+            let renderer = AXIRStaticRenderer(resolver: resolver)
             let size = CGSize(width: device.screenSize.width, height: device.screenSize.height)
             let pngData: Data
             do {

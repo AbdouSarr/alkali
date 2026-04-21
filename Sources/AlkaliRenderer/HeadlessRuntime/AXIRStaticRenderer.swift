@@ -24,8 +24,12 @@ import AlkaliCore
 ///   cornerRadius, frame width/height).
 ///
 /// Both paths produce a valid PNG so the CLI/MCP can ship bytes regardless of framework.
-public final class AXIRStaticRenderer: Sendable {
-    public init() {}
+public final class AXIRStaticRenderer: @unchecked Sendable {
+    private let resolver: AssetResolver?
+
+    public init(resolver: AssetResolver? = nil) {
+        self.resolver = resolver
+    }
 
     /// Render an AXIR tree to PNG data. `size` is the canvas size in points.
     public func render(
@@ -105,9 +109,9 @@ public final class AXIRStaticRenderer: Sendable {
 
         if hasText, let textMod = node.modifiers.first(where: { $0.type == .text }),
            case .string(let text)? = textMod.parameters["value"] {
-            drawText(text, in: frame, ctx: ctx, colorScheme: colorScheme, large: true)
-        } else if hasImage {
-            drawImagePlaceholder(in: frame, ctx: ctx, colorScheme: colorScheme)
+            drawText(text, in: frame, ctx: ctx, colorScheme: colorScheme, large: true, node: node)
+        } else if hasImage, let imgMod = node.modifiers.first(where: { $0.type == .image }) {
+            drawImage(modifier: imgMod, in: frame, ctx: ctx, colorScheme: colorScheme, node: node)
         } else if frame.width > 60 && frame.height > 18 {
             // Only label container-ish nodes, and suppress the repetitive "UI" prefix for clarity.
             let marker = typeMarker(for: node.viewType)
@@ -171,18 +175,30 @@ public final class AXIRStaticRenderer: Sendable {
     }
 
     private func backgroundColor(for node: AXIRNode, colorScheme: AXIRColorScheme, depth: Int) -> CGColor {
-        // Explicit UIKit backgroundColor modifier
-        if let mod = node.modifiers.first(where: { $0.type == .backgroundColor }),
-           case .string(let hex)? = mod.parameters["hex"] {
-            return color(fromHex: hex)
-        }
+        // Iterate both backgroundColor and background in priority order. We accept hex,
+        // name reference, or expression-string — the resolver handles the semantic details.
+        for type in [ModifierType.backgroundColor, .background] {
+            guard let mod = node.modifiers.first(where: { $0.type == type }) else { continue }
 
-        // SwiftUI background(Color.something)
-        if let mod = node.modifiers.first(where: { $0.type == .background }) {
-            // Extract any string arg — best-effort.
+            // Named asset-catalog color first — resolver can produce light/dark variant.
+            if case .assetReference(_, let name)? = mod.parameters["name"] ?? mod.parameters.first(where: { _, v in
+                if case .assetReference = v { return true }; return false
+            })?.value {
+                if let resolved = resolver?.resolveColor(name, colorScheme: colorScheme) { return resolved }
+            }
+
+            // Literal hex.
+            if case .string(let hex)? = mod.parameters["hex"] {
+                return color(fromHex: hex)
+            }
+
+            // Arbitrary expression — resolver handles known tokens, system colors, hex.
             for (_, v) in mod.parameters {
-                if case .string(let s) = v, let c = colorFromExpression(s, colorScheme: colorScheme) {
-                    return c
+                if case .string(let s) = v {
+                    if let resolved = resolver?.resolveColor(s, colorScheme: colorScheme) { return resolved }
+                    if let c = colorFromExpression(s, colorScheme: colorScheme) { return c }
+                } else if case .color(let c) = v {
+                    return CGColor(red: c.red, green: c.green, blue: c.blue, alpha: c.alpha)
                 }
             }
         }
@@ -263,15 +279,38 @@ public final class AXIRStaticRenderer: Sendable {
         return viewType
     }
 
-    private func drawText(_ text: String, in frame: CGRect, ctx: CGContext, colorScheme: AXIRColorScheme, large: Bool, alignTop: Bool = false) {
+    private func drawText(_ text: String, in frame: CGRect, ctx: CGContext, colorScheme: AXIRColorScheme, large: Bool, alignTop: Bool = false, node: AXIRNode? = nil) {
         let fontSize: CGFloat = large ? 14 : 10
-        let font = CTFontCreateWithName("Helvetica-Bold" as CFString, fontSize, nil)
-        let textColor = colorScheme == .dark
-            ? CGColor(gray: 1.0, alpha: 0.85)
-            : CGColor(gray: 0.15, alpha: 0.85)
+        // Prefer a resolver-supplied font if the node's modifiers point at one.
+        var font: CTFont?
+        if let node, let fontMod = node.modifiers.first(where: { $0.type == .font }) {
+            for (_, v) in fontMod.parameters where font == nil {
+                if case .string(let s) = v {
+                    font = resolver?.resolveFont(s, size: fontSize)
+                }
+            }
+        }
+        let resolvedFont = font ?? CTFontCreateWithName("Helvetica-Bold" as CFString, fontSize, nil)
+
+        // Try to resolve a foreground color if the node's modifiers specify one.
+        var textColor: CGColor = colorScheme == .dark
+            ? CGColor(gray: 1.0, alpha: 0.92)
+            : CGColor(gray: 0.15, alpha: 0.92)
+        if let node {
+            for type in [ModifierType.foregroundColor, .foregroundStyle, .textColor, .tint] {
+                if let mod = node.modifiers.first(where: { $0.type == type }) {
+                    for (_, v) in mod.parameters {
+                        if case .string(let s) = v,
+                           let c = resolver?.resolveColor(s, colorScheme: colorScheme) ?? colorFromExpression(s, colorScheme: colorScheme) {
+                            textColor = c; break
+                        }
+                    }
+                }
+            }
+        }
 
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
+            .font: resolvedFont,
             .foregroundColor: textColor
         ]
         let attributed = NSAttributedString(string: text, attributes: attributes)
@@ -281,11 +320,94 @@ public final class AXIRStaticRenderer: Sendable {
         ctx.saveGState()
         ctx.textMatrix = .identity
         let textY = alignTop ? frame.maxY - fontSize - 2 : frame.midY - fontSize / 2
-        ctx.translateBy(x: frame.origin.x, y: textY)
+        ctx.translateBy(x: frame.origin.x + 6, y: textY)
         ctx.scaleBy(x: 1.0, y: -1.0)
         ctx.textPosition = .zero
         CTLineDraw(line, ctx)
         ctx.restoreGState()
+    }
+
+    /// Draw an image modifier in the given frame. Resolution order:
+    /// 1. If the modifier's `name` resolves to an xcasset imageset → draw the bitmap.
+    /// 2. If the name looks like an SF Symbol (contains a dot or matches common glyph names) → draw the system symbol.
+    /// 3. Placeholder diagonal.
+    private func drawImage(modifier: AXIRModifier, in frame: CGRect, ctx: CGContext, colorScheme: AXIRColorScheme, node: AXIRNode) {
+        // Extract name from the modifier's parameters (`.assetReference` or `.string`).
+        var name: String? = nil
+        var isExplicitSystem = false
+        for (key, v) in modifier.parameters {
+            if case .assetReference(_, let n) = v { name = n; break }
+            if case .string(let s) = v {
+                name = s
+                if key == "systemName" { isExplicitSystem = true }
+            }
+        }
+
+        // Compute tint from any nearby tint/foregroundColor modifier.
+        var tint: CGColor? = nil
+        for type in [ModifierType.tint, .foregroundColor, .foregroundStyle] {
+            if let mod = node.modifiers.first(where: { $0.type == type }) {
+                for (_, v) in mod.parameters {
+                    if case .string(let s) = v {
+                        if let c = resolver?.resolveColor(s, colorScheme: colorScheme) ?? colorFromExpression(s, colorScheme: colorScheme) {
+                            tint = c; break
+                        }
+                    }
+                }
+            }
+        }
+
+        guard let name else { drawImagePlaceholder(in: frame, ctx: ctx, colorScheme: colorScheme); return }
+
+        // Look up in imagesets first (unless explicitly system name).
+        if !isExplicitSystem, let cg = resolver?.resolveImage(name) {
+            draw(cgImage: cg, in: frame, ctx: ctx, aspect: .fit, tint: nil)
+            return
+        }
+
+        // Try SF Symbol.
+        let pt = min(frame.width, frame.height) * 0.6
+        if let cg = resolver?.resolveSymbol(name, pointSize: pt, tint: tint) {
+            draw(cgImage: cg, in: frame, ctx: ctx, aspect: .fit, tint: tint)
+            return
+        }
+
+        drawImagePlaceholder(in: frame, ctx: ctx, colorScheme: colorScheme)
+    }
+
+    private enum Aspect { case fit, fill }
+
+    private func draw(cgImage: CGImage, in frame: CGRect, ctx: CGContext, aspect: Aspect, tint: CGColor?) {
+        let imgSize = CGSize(width: cgImage.width, height: cgImage.height)
+        let scale: CGFloat
+        switch aspect {
+        case .fit:  scale = min(frame.width / imgSize.width, frame.height / imgSize.height)
+        case .fill: scale = max(frame.width / imgSize.width, frame.height / imgSize.height)
+        }
+        let drawn = CGSize(width: imgSize.width * scale, height: imgSize.height * scale)
+        let origin = CGPoint(
+            x: frame.midX - drawn.width / 2,
+            y: frame.midY - drawn.height / 2
+        )
+        let destRect = CGRect(origin: origin, size: drawn)
+
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
+
+        // Our drawing context is flipped (origin top-left). When we hand an image to
+        // CGContext.draw in this coordinate space it draws upside-down, so flip the
+        // destination rect vertically first.
+        ctx.translateBy(x: 0, y: destRect.maxY + destRect.minY)
+        ctx.scaleBy(x: 1, y: -1)
+
+        if let tint {
+            // Tinted draw: clip to image alpha, fill with tint color.
+            ctx.clip(to: destRect, mask: cgImage)
+            ctx.setFillColor(tint)
+            ctx.fill(destRect)
+        } else {
+            ctx.draw(cgImage, in: destRect)
+        }
     }
 
     private func drawImagePlaceholder(in frame: CGRect, ctx: CGContext, colorScheme: AXIRColorScheme) {

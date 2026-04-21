@@ -412,6 +412,22 @@ public final class UnifiedCodeGraph: CodeGraphQuerying, @unchecked Sendable {
         return sets
     }
 
+    /// Merged `imageSetName → absolute path` map across every discovered catalog.
+    public func imagePathsByName() throws -> [String: String] {
+        var merged: [String: String] = [:]
+        for catalogPath in assetCatalogPaths {
+            for (name, path) in try assetParser.imagePathsByName(in: catalogPath) {
+                merged[name] = path
+            }
+        }
+        return merged
+    }
+
+    /// Scan all swift files for `static let` color/font declarations and return a lookup table.
+    public func colorSymbolTable() -> ColorSymbolTable {
+        SymbolTableBuilder().build(from: swiftFiles)
+    }
+
     // MARK: - Helpers
 
     private func analyzeAllViews() throws -> [AnalyzedView] {

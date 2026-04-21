@@ -88,6 +88,49 @@ public struct AssetCatalogParser: Sendable {
         return imageSets
     }
 
+    /// Returns `[imageSetName: absolutePath]` — picks the best available image variant
+    /// (preferring `.pdf` / `.svg` (vector), then `@3x`, then `@2x`, then `@1x`).
+    public func imagePathsByName(in catalogPath: String) throws -> [String: String] {
+        let fm = FileManager.default
+        var result: [String: String] = [:]
+
+        guard let enumerator = fm.enumerator(atPath: catalogPath) else { return [:] }
+
+        while let relativePath = enumerator.nextObject() as? String {
+            guard relativePath.hasSuffix(".imageset") else { continue }
+            let imagesetName = ((relativePath as NSString).lastPathComponent as NSString).deletingPathExtension
+            let imagesetPath = (catalogPath as NSString).appendingPathComponent(relativePath)
+            let contentsPath = (imagesetPath as NSString).appendingPathComponent("Contents.json")
+            guard let data = fm.contents(atPath: contentsPath) else { continue }
+            guard let contents = try? JSONDecoder().decode(ImagesetContents.self, from: data) else { continue }
+
+            if let best = pickBestImage(in: imagesetPath, entries: contents.images) {
+                result[imagesetName] = best
+            }
+        }
+        return result
+    }
+
+    private func pickBestImage(in imagesetPath: String, entries: [ImageEntry]) -> String? {
+        // Rank: pdf > svg > 3x > 2x > 1x > other.
+        func rank(_ entry: ImageEntry) -> Int {
+            let filename = entry.filename ?? ""
+            if filename.hasSuffix(".pdf") { return 100 }
+            if filename.hasSuffix(".svg") { return 90 }
+            switch entry.scale {
+            case "3x": return 80
+            case "2x": return 70
+            case "1x": return 60
+            default:   return 50
+            }
+        }
+        let sorted = entries
+            .filter { $0.filename != nil && !($0.filename!.isEmpty) }
+            .sorted { rank($0) > rank($1) }
+        guard let pick = sorted.first, let name = pick.filename else { return nil }
+        return (imagesetPath as NSString).appendingPathComponent(name)
+    }
+
     private func parseColorComponent(_ value: String) -> Double {
         if value.hasPrefix("0x") || value.hasPrefix("0X") {
             let hex = String(value.dropFirst(2))
