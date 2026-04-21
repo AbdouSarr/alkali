@@ -36,6 +36,22 @@ public struct StateExtractor: Sendable {
         return result
     }
 
+    /// Returns `[viewName: [propertyName: typeName]]` — harvested from type annotations on
+    /// stored properties so the type-synthesizer can supply fallback values.
+    public func extractPropertyTypes(from swiftFiles: [String]) -> [String: [String: String]] {
+        var result: [String: [String: String]] = [:]
+        for path in swiftFiles {
+            guard let src = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            let file = Parser.parse(source: src)
+            let visitor = PropertyTypeVisitor()
+            visitor.walk(file)
+            for (viewName, props) in visitor.perView {
+                result[viewName, default: [:]].merge(props) { old, _ in old }
+            }
+        }
+        return result
+    }
+
     /// Harvests SwiftUI `#Preview { … }` blocks and `static var sample: Self = …` patterns,
     /// producing one `FixtureInstance` per view where possible.
     public func extractFixtures(from swiftFiles: [String]) -> [String: FixtureInstance] {
@@ -91,6 +107,38 @@ private final class SourceDefaultVisitor: SyntaxVisitor {
             guard let rhs = binding.initializer?.value.trimmedDescription else { continue }
             if hasWrapper || isPlainLetVar {
                 perView[viewName, default: [:]][name] = rhs
+            }
+        }
+        return .skipChildren
+    }
+}
+
+// MARK: - Property-type visitor
+
+private final class PropertyTypeVisitor: SyntaxVisitor {
+    var perView: [String: [String: String]] = [:]
+    private var nameStack: [String] = []
+
+    init() { super.init(viewMode: .sourceAccurate) }
+
+    override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
+        nameStack.append(node.name.text); defer { _ = nameStack.popLast() }
+        walk(node.memberBlock)
+        return .skipChildren
+    }
+
+    override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
+        nameStack.append(node.name.text); defer { _ = nameStack.popLast() }
+        walk(node.memberBlock)
+        return .skipChildren
+    }
+
+    override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard let viewName = nameStack.last else { return .skipChildren }
+        for binding in node.bindings {
+            let name = binding.pattern.trimmedDescription
+            if let type = binding.typeAnnotation?.type.trimmedDescription {
+                perView[viewName, default: [:]][name] = type
             }
         }
         return .skipChildren

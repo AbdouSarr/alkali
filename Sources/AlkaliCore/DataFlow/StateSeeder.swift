@@ -54,19 +54,27 @@ public enum SeededValue: Codable, Hashable, Sendable {
 public struct UnifiedStateSeeder: StateSeeder {
     private let overrides: [String: [String: SeededValue]]
     private let sourceDefaults: [String: [String: String]]   // view → propertyName → rawExpr
+    private let propertyTypes: [String: [String: String]]    // view → propertyName → typeName
     private let fixtures: [String: FixtureInstance]
     private let fakerCorpus: FakerCorpus
+    /// Closure form to decouple from AlkaliCodeGraph (which we can't depend on from Core).
+    /// Callers pass a synthesizer function produced by the code graph.
+    private let synthesize: (@Sendable (String) -> SeededValue)?
 
     public init(
         overrides: [String: [String: SeededValue]] = [:],
         sourceDefaults: [String: [String: String]] = [:],
+        propertyTypes: [String: [String: String]] = [:],
         fixtures: [String: FixtureInstance] = [:],
-        fakerCorpus: FakerCorpus = .default
+        fakerCorpus: FakerCorpus = .default,
+        synthesize: (@Sendable (String) -> SeededValue)? = nil
     ) {
         self.overrides = overrides
         self.sourceDefaults = sourceDefaults
+        self.propertyTypes = propertyTypes
         self.fixtures = fixtures
         self.fakerCorpus = fakerCorpus
+        self.synthesize = synthesize
     }
 
     public func seed(for viewName: String) -> [String: SeededValue] {
@@ -91,9 +99,14 @@ public struct UnifiedStateSeeder: StateSeeder {
             for (key, value) in over { result[key] = value }
         }
 
-        // For anything still missing, emit a faker value using type hints (if we have them).
-        // This pass is only meaningful if the caller supplied a type hint per binding — deferred
-        // to the code-graph integration step.
+        // Synthesize plausible values for any property we have a type for but no literal value.
+        if let synthesize, let types = propertyTypes[viewName] {
+            for (key, type) in types where result[key] == nil {
+                let synthesized = synthesize(type)
+                if case .null = synthesized { continue }
+                result[key] = synthesized
+            }
+        }
 
         return result
     }

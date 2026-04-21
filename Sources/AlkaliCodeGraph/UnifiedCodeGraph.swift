@@ -435,16 +435,25 @@ public final class UnifiedCodeGraph: CodeGraphQuerying, @unchecked Sendable {
     /// Builds a `StateSeeder` by combining:
     /// - user overrides from `.alkali-state.json` at the project root,
     /// - source-level default initializers for `@State`/`@Published`/`let`/`var`,
-    /// - fixtures mined from `#Preview { }` and `static var sample` patterns.
+    /// - fixtures mined from `#Preview { }` and `static var sample` patterns,
+    /// - type-based synthesis for anything still missing (struct recursion, enum first-case, primitives).
     public func stateSeeder() -> UnifiedStateSeeder {
         let extractor = StateExtractor()
         let defaults = extractor.extractSourceDefaults(from: swiftFiles)
+        let propertyTypes = extractor.extractPropertyTypes(from: swiftFiles)
         let fixtures = extractor.extractFixtures(from: swiftFiles)
         let overrides = UnifiedStateSeeder.loadOverrides(fromProjectRoot: projectRoot)
+        let typeGraph = TypeGraphBuilder().build(from: swiftFiles)
+        let synthesizer = TypeSynthesizer(types: typeGraph)
+        let fn: @Sendable (String) -> SeededValue = { typeName in
+            synthesizer.synthesize(typeName)
+        }
         return UnifiedStateSeeder(
             overrides: overrides,
             sourceDefaults: defaults,
-            fixtures: fixtures
+            propertyTypes: propertyTypes,
+            fixtures: fixtures,
+            synthesize: fn
         )
     }
 

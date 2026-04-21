@@ -9,5 +9,5 @@
 import Foundation
 
 public enum AlkaliVersion {
-    public static let current = "2.2.0"
+    public static let current = "2.5.0"
 }
