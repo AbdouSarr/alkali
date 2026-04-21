@@ -87,6 +87,36 @@ public struct StaticDataFlowAnalyzer: Sendable {
             case .state, .stateObject:
                 // States are sources, not initiators of edges in this pass.
                 break
+
+            case .iboutlet:
+                // @IBOutlet points at an IB-declared view of matching type.
+                // We connect each outlet to other outlets of the same sourceType in the same view —
+                // a weak signal but useful for grouping.
+                for candidate in nodes where candidate.id != node.id
+                    && candidate.kind == .iboutlet
+                    && candidate.dataType == node.dataType
+                    && candidate.viewType == node.viewType
+                {
+                    let pair = [node.id.uuidString, candidate.id.uuidString].sorted()
+                    if pair[0] == node.id.uuidString {
+                        edges.append(DataEdge(from: node.id, to: candidate.id, kind: .outlet, via: node.dataType))
+                    }
+                }
+
+            case .ibaction, .objcAction:
+                // An IBAction / @objc target-action handler is the destination for outlet-sender
+                // edges. We don't have the XIB connection info in the data flow pass yet — this
+                // node is surfaced as-is so the UI can render it.
+                break
+
+            case .published:
+                // @Published emits to any @ObservedObject / @Observable in the system that holds
+                // an instance of the same owning type. Too speculative without semantic resolution —
+                // leave nodes unconnected at this pass.
+                break
+
+            case .ibinspectable, .delegate:
+                break
             }
         }
 
@@ -145,6 +175,12 @@ public struct StaticDataFlowAnalyzer: Sendable {
         case .observedObject, .observable: return .observable
         case .environment: return .environment
         case .environmentObject: return .environmentObject
+        case .iboutlet: return .iboutlet
+        case .ibaction: return .ibaction
+        case .ibinspectable: return .ibinspectable
+        case .published: return .published
+        case .delegate: return .delegate
+        case .objcAction: return .objcAction
         }
     }
 }

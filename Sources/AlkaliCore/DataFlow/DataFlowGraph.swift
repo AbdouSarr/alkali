@@ -50,6 +50,13 @@ public enum DataNodeKind: String, Codable, Hashable, Sendable {
     case observable
     case environment
     case environmentObject
+    // UIKit / Combine
+    case iboutlet
+    case ibaction
+    case ibinspectable
+    case published
+    case delegate
+    case objcAction
 }
 
 public struct DataEdge: Codable, Hashable, Sendable {
@@ -71,4 +78,8 @@ public enum DataEdgeKind: String, Codable, Hashable, Sendable {
     case observation
     case environment
     case derivation
+    case outlet       // IBOutlet points at an IB-declared view
+    case action       // IBAction / target-action receiver
+    case publishes    // @Published property → subscriber
+    case delegation   // object assigned as a delegate of another
 }

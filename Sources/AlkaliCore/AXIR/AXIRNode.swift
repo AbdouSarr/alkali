@@ -74,6 +74,7 @@ public struct AXIRDataBinding: Codable, Hashable, Sendable {
 }
 
 public enum BindingKind: String, Codable, Hashable, Sendable {
+    // SwiftUI
     case state
     case binding
     case observedObject
@@ -81,4 +82,12 @@ public enum BindingKind: String, Codable, Hashable, Sendable {
     case environment
     case observable
     case stateObject
+
+    // UIKit / Combine
+    case iboutlet
+    case ibaction
+    case ibinspectable
+    case published
+    case delegate
+    case objcAction
 }

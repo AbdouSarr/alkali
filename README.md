@@ -1,20 +1,20 @@
 # Alkali
 
-A reactive bridge between Swift's compiler and your running UI.
+A reactive bridge between Swift's compiler and your running UI. **SwiftUI and UIKit.**
 
-Alkali is a development tool that provides semantic understanding of Swift/SwiftUI projects, headless view rendering, function-level hot-patching, and an MCP server for agentic workflows. It's designed to close the gap between "save file" and "see every possible state of your UI."
+Alkali is a development tool that provides semantic understanding of Swift/SwiftUI/UIKit projects, headless view rendering, function-level hot-patching, and an MCP server for agentic workflows. It's designed to close the gap between "save file" and "see every possible state of your UI."
 
 ## What It Does
 
-- **Code Graph**: Parses SwiftUI view bodies, modifier chains, data bindings, asset catalogs, and Xcode project configuration using SwiftSyntax. Understands your project semantically, not just as text.
-- **Headless Rendering**: Renders any SwiftUI view to PNG without Xcode or a simulator. Uses `NSHostingView` on macOS with configurable device profiles, color schemes, and environment overrides.
+- **Code Graph**: Parses SwiftUI view bodies, UIKit class hierarchies (`UIViewController` / `UIView` subclasses), XIB/Storyboard XML, modifier chains, data bindings, asset catalogs, and Xcode project / workspace configuration using SwiftSyntax + XcodeProj. Understands your project semantically, not just as text.
+- **Headless Rendering**: Renders any SwiftUI view to PNG via `NSHostingView`. Renders any UIKit view (when declared in an `.xib` or `.storyboard`) to PNG via a CoreGraphics-based AXIR static renderer — no simulator, no Xcode.
 - **Preview Engine**: Generates every meaningful variant of a view (cartesian product or pairwise coverage across data states, color schemes, dynamic type sizes, devices), then diffs against baselines.
 - **Function Patcher**: ARM64 trampoline-based hot-patching that redirects function calls at the machine code level. Preserves `@State` across patches via a side table keyed by view identity.
 - **DevTools**: Runtime view tree inspection, live value editing with source writeback, state mutation timeline with nanosecond precision.
 - **Event System**: Append-only event log with causal chains linking user interactions → state mutations → re-renders. Session export/replay via compressed JSON.
-- **Data Flow Analysis**: Maps `@State` → `@Binding` chains across views, detects shared `@Observable` and `@Environment` dependencies, traces binding origins.
+- **Data Flow Analysis**: Maps `@State` → `@Binding` chains across SwiftUI views; detects `@IBOutlet`, `@IBAction`, `@Published`, delegate/dataSource conformance, and target-action wiring in UIKit.
 - **Plugin System**: Register plugins with manifests declaring required capabilities and triggers. Plugins query the code graph, renderer, and event log through a scoped context.
-- **MCP Server**: 11 tools exposed over JSON-RPC (stdio transport) for agent integration.
+- **MCP Server**: 12 tools exposed over JSON-RPC (stdio transport) for agent integration — including the new `alkali.preview.render` for on-demand PNG rendering.
 - **WebSocket API**: Real-time event streaming via NIO-based WebSocket server.
 
 ## Requirements
@@ -28,7 +28,7 @@ Alkali is a development tool that provides semantic understanding of Swift/Swift
 ### Homebrew (recommended)
 
 ```bash
-brew tap abdousarr/tap
+brew tap abdousarr/homebrew-tap
 brew install alkali
 ```
 
@@ -106,17 +106,18 @@ Starts a JSON-RPC server over stdio. If you used `alkali setup`, this is already
 
 | Tool | Description |
 |------|-------------|
-| `alkali.codeGraph.findViews` | Find all SwiftUI View declarations |
-| `alkali.codeGraph.viewStructure` | Get the AXIR (view tree) of a named view |
+| `alkali.codeGraph.findViews` | Find all SwiftUI `View`s and UIKit `UIView`/`UIViewController` subclasses (with transitive resolution) |
+| `alkali.codeGraph.viewStructure` | Get the AXIR (view tree) of a named view — walks SwiftUI bodies or XIB/Storyboard hierarchies |
 | `alkali.codeGraph.assetColors` | List all color assets with light/dark variants |
-| `alkali.codeGraph.assetUsages` | Find views that reference a named asset |
-| `alkali.codeGraph.targets` | List project targets |
-| `alkali.codeGraph.buildSettings` | Get build settings for a target |
+| `alkali.codeGraph.assetUsages` | Find where a named asset is referenced (SwiftUI `Image`/`Color`, UIKit `UIImage(named:)`/`UIColor(named:)`, IB `image`/`name` attrs) |
+| `alkali.codeGraph.targets` | List project targets (workspace-aware — picks the app project, not Pods) |
+| `alkali.codeGraph.buildSettings` | Get full build settings for a target — `SWIFT_VERSION`, `IPHONEOS_DEPLOYMENT_TARGET`, `SDKROOT`, etc. |
 | `alkali.codeGraph.dependencies` | Get target dependency graph |
 | `alkali.events.query` | Query events by kind, time range, limit |
 | `alkali.events.causalChain` | Trace causal chain from an event |
-| `alkali.dataFlow.dependencies` | Get data dependencies of a view |
+| `alkali.dataFlow.dependencies` | Get data dependencies of a view (`@State`/`@Binding` for SwiftUI; `@IBOutlet`/`@IBAction`/`@Published`/delegates for UIKit) |
 | `alkali.dataFlow.bindingChain` | Trace a `@Binding` to its `@State` origin |
+| `alkali.preview.render` | Render a view's AXIR to a PNG on disk (CoreGraphics-backed for both SwiftUI schematic and IB-accurate UIKit) |
 
 ### Render a View
 

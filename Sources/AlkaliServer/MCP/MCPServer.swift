@@ -9,6 +9,7 @@
 import Foundation
 import AlkaliCore
 import AlkaliCodeGraph
+import AlkaliRenderer
 
 /// MCP (Model Context Protocol) server — JSON-RPC over stdio. Exposes all Alkali tools.
 public final class MCPServer: @unchecked Sendable {
@@ -60,7 +61,7 @@ public final class MCPServer: @unchecked Sendable {
             return makeResponse(id: id, result: [
                 "protocolVersion": "2024-11-05",
                 "capabilities": ["tools": ["listChanged": false]],
-                "serverInfo": ["name": "alkali", "version": "1.0.6"]
+                "serverInfo": ["name": "alkali", "version": AlkaliVersion.current]
             ])
         case "tools/list":
             return makeResponse(id: id, result: ["tools": toolDefinitions()])
@@ -179,6 +180,45 @@ public final class MCPServer: @unchecked Sendable {
             }
             return "{\"result\": null}"
 
+        // Preview tool — renders a view's AXIR to a PNG.
+        case "alkali.preview.render":
+            let viewName = arguments["viewName"] as? String ?? ""
+            let deviceName = arguments["device"] as? String ?? "iPhone 16 Pro"
+            let scheme = (arguments["scheme"] as? String)?.lowercased() ?? "light"
+            let outputArg = arguments["output"] as? String
+
+            guard let axir = try codeGraph.generateStaticAXIR(for: viewName) else {
+                return "{\"error\": \"View '\(viewName)' not found\"}"
+            }
+            let device = DeviceProfile.allProfiles.first(where: {
+                $0.name.lowercased().contains(deviceName.lowercased())
+            }) ?? .iPhone16Pro
+            let axirScheme: AXIRColorScheme = (scheme == "dark") ? .dark : .light
+            let renderer = AXIRStaticRenderer()
+            let size = CGSize(width: device.screenSize.width, height: device.screenSize.height)
+            let pngData: Data
+            do {
+                pngData = try renderer.render(axir: axir, size: size, colorScheme: axirScheme)
+            } catch {
+                return "{\"error\": \"Render failed: \(error.localizedDescription)\"}"
+            }
+            let outputPath = outputArg ?? "\(viewName)_\(device.name.replacingOccurrences(of: " ", with: "_"))_\(scheme).png"
+            do {
+                try pngData.write(to: URL(fileURLWithPath: outputPath))
+            } catch {
+                return "{\"error\": \"Write failed: \(error.localizedDescription)\"}"
+            }
+            let summary: [String: Any] = [
+                "viewName": viewName,
+                "device": device.name,
+                "scheme": scheme,
+                "bytes": pngData.count,
+                "output": outputPath,
+                "nodes": axir.allNodes.count
+            ]
+            let data = try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys])
+            return String(data: data, encoding: .utf8) ?? "{}"
+
         default:
             return "{\"error\": \"Unknown tool: \(name)\"}"
         }
@@ -232,9 +272,9 @@ public final class MCPServer: @unchecked Sendable {
     }
 
     /// Formats an AXIR tree as an indented text tree.
-    private func formatAXIRTree(_ node: AXIRNode, indent: String = "", isLast: Bool = true) -> String {
-        let connector = indent.isEmpty ? "" : (isLast ? "└── " : "├── ")
-        let childIndent = indent.isEmpty ? "" : (indent + (isLast ? "    " : "│   "))
+    private func formatAXIRTree(_ node: AXIRNode, indent: String = "", isLast: Bool = true, isRoot: Bool = true) -> String {
+        let connector = isRoot ? "" : (isLast ? "└── " : "├── ")
+        let childIndent = isRoot ? "" : (indent + (isLast ? "    " : "│   "))
 
         var line = "\(indent)\(connector)\(node.viewType)"
 
@@ -270,7 +310,7 @@ public final class MCPServer: @unchecked Sendable {
 
         for (i, child) in node.children.enumerated() {
             let childIsLast = i == node.children.count - 1
-            result += "\n" + formatAXIRTree(child, indent: childIndent, isLast: childIsLast)
+            result += "\n" + formatAXIRTree(child, indent: childIndent, isLast: childIsLast, isRoot: false)
         }
 
         return result
@@ -365,6 +405,12 @@ public final class MCPServer: @unchecked Sendable {
             tool("alkali.dataFlow.bindingChain",
                  "Trace a @Binding property back to its @State origin through the view hierarchy.",
                  ["property": req("string", "The property name to trace")]),
+            tool("alkali.preview.render",
+                 "Render a view's static AXIR to a PNG file on disk. Works for SwiftUI (schematic layout from modifier hints) and UIKit (geometrically accurate when the view is defined in an .xib or .storyboard).",
+                 ["viewName": req("string", "The view name to render"),
+                  "device":   opt("string", "Device profile name (default 'iPhone 16 Pro')"),
+                  "scheme":   opt("string", "Color scheme: 'light' or 'dark'"),
+                  "output":   opt("string", "Output PNG path (defaults to <viewName>_<device>_<scheme>.png)")])
         ]
     }
 

@@ -19,7 +19,7 @@ struct AlkaliCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "alkali",
         abstract: "A reactive bridge between Swift's compiler and your running UI",
-        version: "1.0.6",
+        version: AlkaliVersion.current,
         subcommands: [
             SetupCommand.self,
             MCPServerCommand.self,
@@ -325,9 +325,17 @@ struct RenderCommand: ParsableCommand {
         let colorScheme: ColorSchemeOverride = scheme == "dark" ? .dark : .light
         let outputPath = output ?? "\(viewName)_\(deviceProfile.name.replacingOccurrences(of: " ", with: "_"))_\(colorScheme.rawValue).png"
 
+        // Write the AXIR sidecar JSON.
         let axirData = try JSONEncoder().encode(axir)
         let axirPath = outputPath.replacingOccurrences(of: ".png", with: ".axir.json")
         try axirData.write(to: URL(fileURLWithPath: axirPath))
+
+        // Render the PNG.
+        let renderer = AXIRStaticRenderer()
+        let size = CGSize(width: deviceProfile.screenSize.width, height: deviceProfile.screenSize.height)
+        let axirScheme: AXIRColorScheme = colorScheme == .dark ? .dark : .light
+        let pngData = try renderer.render(axir: axir, size: size, colorScheme: axirScheme)
+        try pngData.write(to: URL(fileURLWithPath: outputPath))
 
         print("View: \(viewName)")
         print("Device: \(deviceProfile.name)")
@@ -335,9 +343,7 @@ struct RenderCommand: ParsableCommand {
         print("Modifiers: \(axir.modifiers.count)")
         print("Children: \(axir.allNodes.count) nodes")
         print("AXIR: \(axirPath)")
-        print("")
-        print("Static AXIR exported. For bitmap rendering, use the MCP server's")
-        print("alkali.preview.render tool with a connected renderer.")
+        print("PNG:  \(outputPath) (\(pngData.count) bytes)")
     }
 }
 
@@ -432,13 +438,22 @@ struct PreviewCommand: ParsableCommand {
                     print("    Variants: \(variantInstances.count)")
 
                     if let axir = try codeGraph.generateStaticAXIR(for: view.name) {
+                        let renderer = AXIRStaticRenderer()
+                        let size = CGSize(width: DeviceProfile.iPhone16Pro.screenSize.width,
+                                          height: DeviceProfile.iPhone16Pro.screenSize.height)
                         for variant in variantInstances {
+                            // Render once per variant. For light/dark we use the scheme
+                            // signalled by the variant axes; default to light.
+                            let scheme: AXIRColorScheme = self.schemes.contains("dark") ? .dark : .light
+                            let started = CFAbsoluteTimeGetCurrent()
+                            let imageData = (try? renderer.render(axir: axir, size: size, colorScheme: scheme)) ?? Data()
+                            let duration = CFAbsoluteTimeGetCurrent() - started
                             catalog.add(CatalogEntry(
                                 viewName: view.name,
                                 variant: variant,
-                                imageData: Data(),
+                                imageData: imageData,
                                 axir: axir,
-                                renderTime: 0,
+                                renderTime: duration,
                                 deviceProfile: .iPhone16Pro
                             ))
                         }
@@ -522,14 +537,20 @@ struct CatalogExportCommand: ParsableCommand {
         Task {
             do {
                 let views = try await codeGraph.viewDeclarations(in: nil)
+                let renderer = AXIRStaticRenderer()
+                let size = CGSize(width: DeviceProfile.iPhone16Pro.screenSize.width,
+                                  height: DeviceProfile.iPhone16Pro.screenSize.height)
                 for view in views {
                     if let axir = try codeGraph.generateStaticAXIR(for: view.name) {
+                        let started = CFAbsoluteTimeGetCurrent()
+                        let imageData = (try? renderer.render(axir: axir, size: size, colorScheme: .light)) ?? Data()
+                        let duration = CFAbsoluteTimeGetCurrent() - started
                         catalog.add(CatalogEntry(
                             viewName: view.name,
                             variant: VariantInstance(values: [:]),
-                            imageData: Data(),
+                            imageData: imageData,
                             axir: axir,
-                            renderTime: 0,
+                            renderTime: duration,
                             deviceProfile: .iPhone16Pro
                         ))
                     }

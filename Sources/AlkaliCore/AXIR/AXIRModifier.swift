@@ -103,5 +103,20 @@ public enum ModifierType: String, Codable, Hashable, Sendable {
     case onAppear
     case onDisappear
     case onChange
+
+    // UIKit-specific (property assignments, IB attributes)
+    case backgroundColor
+    case textColor
+    case text
+    case image
+    case alpha
+    case hidden
+    case isUserInteractionEnabled
+    case contentMode
+    case constraint
+    case addSubview
+    case ibFrame
+    case ibIdentifier
+
     case unknown
 }

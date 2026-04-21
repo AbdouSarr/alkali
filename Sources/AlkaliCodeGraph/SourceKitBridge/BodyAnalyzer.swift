@@ -27,19 +27,59 @@ public struct BodyAnalyzer: Sendable {
     }
 }
 
+public enum ViewFramework: String, Sendable, Codable, Hashable {
+    case swiftUI
+    case uiKit
+    case interfaceBuilder  // XIB/Storyboard-sourced
+}
+
 public struct AnalyzedView: Sendable {
     public let name: String
     public let sourceLocation: AlkaliCore.SourceLocation
     public let bodyAST: ViewBodyAST?
     public let dataBindings: [AXIRDataBinding]
+    public let framework: ViewFramework
+    /// Direct superclass name (UIKit only) — used for transitive resolution.
+    public let superclass: String?
 
-    public init(name: String, sourceLocation: AlkaliCore.SourceLocation, bodyAST: ViewBodyAST?, dataBindings: [AXIRDataBinding]) {
+    public init(
+        name: String,
+        sourceLocation: AlkaliCore.SourceLocation,
+        bodyAST: ViewBodyAST?,
+        dataBindings: [AXIRDataBinding],
+        framework: ViewFramework = .swiftUI,
+        superclass: String? = nil
+    ) {
         self.name = name
         self.sourceLocation = sourceLocation
         self.bodyAST = bodyAST
         self.dataBindings = dataBindings
+        self.framework = framework
+        self.superclass = superclass
     }
 }
+
+/// Known UIKit base types. Any class directly inheriting one of these is considered a UIKit view/controller.
+public let uikitBaseTypes: Set<String> = [
+    // Controllers
+    "UIViewController", "UITableViewController", "UICollectionViewController",
+    "UINavigationController", "UITabBarController", "UIPageViewController",
+    "UISplitViewController", "UIAlertController", "UIDocumentPickerViewController",
+    "UIImagePickerController", "UIActivityViewController",
+    // Views
+    "UIView", "UIControl", "UIButton", "UILabel", "UIImageView",
+    "UIScrollView", "UITableView", "UICollectionView", "UIStackView",
+    "UIVisualEffectView", "UITextField", "UITextView", "UIWindow",
+    "UISwitch", "UISlider", "UISegmentedControl", "UIProgressView",
+    "UIActivityIndicatorView", "UIPickerView", "UIDatePicker",
+    // Cells
+    "UITableViewCell", "UICollectionViewCell", "UICollectionReusableView",
+    // Gesture
+    "UIGestureRecognizer",
+    // UIKit-adjacent frameworks commonly used as roots
+    "SKView", "SKScene", "MTKView", "MKMapView", "PHPickerViewController",
+    "WKWebView", "SCNView", "ARView", "ARSCNView", "ARSKView"
+]
 
 public indirect enum ViewBodyAST: Sendable {
     case leaf(viewType: String, sourceLocation: AlkaliCore.SourceLocation, arguments: [String])
@@ -114,10 +154,106 @@ private final class ViewFinder: SyntaxVisitor {
             name: structName,
             sourceLocation: loc,
             bodyAST: bodyAST,
-            dataBindings: bindings
+            dataBindings: bindings,
+            framework: .swiftUI,
+            superclass: nil
         ))
 
         return .skipChildren
+    }
+
+    override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
+        // UIKit views/controllers are classes; detect by direct superclass in the inheritance clause.
+        // The first inherited identifier in a Swift class decl is always the superclass (if any).
+        guard let inheritanceClause = node.inheritanceClause,
+              let first = inheritanceClause.inheritedTypes.first else {
+            return .visitChildren
+        }
+        let superName = first.type.trimmedDescription
+        let className = node.name.text
+        let loc = sourceLocation(of: node)
+
+        // Extract UIKit data bindings (IBOutlet, IBAction, @Published, delegate-conformance, etc.).
+        let bindings = extractUIKitBindings(from: node)
+
+        views.append(AnalyzedView(
+            name: className,
+            sourceLocation: loc,
+            bodyAST: nil,
+            dataBindings: bindings,
+            framework: .uiKit,
+            superclass: superName
+        ))
+
+        return .visitChildren
+    }
+
+    /// Extract UIKit-style data bindings from a class: IBOutlet, IBAction, @Published, etc.
+    private func extractUIKitBindings(from node: ClassDeclSyntax) -> [AXIRDataBinding] {
+        var bindings: [AXIRDataBinding] = []
+        for member in node.memberBlock.members {
+            if let varDecl = member.decl.as(VariableDeclSyntax.self) {
+                if let binding = extractUIKitVarBinding(from: varDecl) {
+                    bindings.append(binding)
+                }
+            }
+            if let funcDecl = member.decl.as(FunctionDeclSyntax.self) {
+                if let binding = extractUIKitActionBinding(from: funcDecl) {
+                    bindings.append(binding)
+                }
+            }
+        }
+        // Delegate / DataSource conformance
+        if let clause = node.inheritanceClause {
+            for inherited in clause.inheritedTypes {
+                let name = inherited.type.trimmedDescription
+                if name.hasSuffix("Delegate") || name.hasSuffix("DataSource") {
+                    bindings.append(AXIRDataBinding(
+                        property: "self",
+                        bindingKind: .delegate,
+                        sourceType: name
+                    ))
+                }
+            }
+        }
+        return bindings
+    }
+
+    private func extractUIKitVarBinding(from varDecl: VariableDeclSyntax) -> AXIRDataBinding? {
+        for attribute in varDecl.attributes {
+            guard let attr = attribute.as(AttributeSyntax.self) else { continue }
+            let attrName = attr.attributeName.trimmedDescription
+
+            let bindingKind: BindingKind?
+            switch attrName {
+            case "IBOutlet":      bindingKind = .iboutlet
+            case "IBInspectable": bindingKind = .ibinspectable
+            case "Published":     bindingKind = .published
+            case "Binding":       bindingKind = .binding
+            case "State":         bindingKind = .state
+            default:              bindingKind = nil
+            }
+            guard let kind = bindingKind else { continue }
+
+            let propertyName = varDecl.bindings.first?.pattern.trimmedDescription ?? "unknown"
+            let typeName = varDecl.bindings.first?.typeAnnotation?.type.trimmedDescription ?? "Unknown"
+            return AXIRDataBinding(property: propertyName, bindingKind: kind, sourceType: typeName)
+        }
+        return nil
+    }
+
+    private func extractUIKitActionBinding(from funcDecl: FunctionDeclSyntax) -> AXIRDataBinding? {
+        for attribute in funcDecl.attributes {
+            guard let attr = attribute.as(AttributeSyntax.self) else { continue }
+            let attrName = attr.attributeName.trimmedDescription
+            if attrName == "IBAction" {
+                return AXIRDataBinding(property: funcDecl.name.text, bindingKind: .ibaction, sourceType: "IBAction")
+            }
+            if attrName == "objc" && funcDecl.signature.parameterClause.parameters.count <= 2 {
+                return AXIRDataBinding(property: funcDecl.name.text, bindingKind: .objcAction, sourceType: "@objc")
+            }
+        }
+        return nil
     }
 
     private func extractDataBinding(from varDecl: VariableDeclSyntax) -> AXIRDataBinding? {
