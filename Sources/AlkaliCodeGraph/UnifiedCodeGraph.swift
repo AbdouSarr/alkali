@@ -320,18 +320,22 @@ public final class UnifiedCodeGraph: CodeGraphQuerying, @unchecked Sendable {
             return axirGenerator.generate(from: view)
 
         case .uiKit, .interfaceBuilder:
-            // If there's a .xib adjacent to the Swift source (same basename), parse that.
-            // Otherwise fall back to an empty shell node so the renderer still has something
-            // to draw.
             let ibGen = IBAXIRGenerator()
             let ibParser = InterfaceBuilderParser()
 
+            // 1. XIB / Storyboard hierarchy.
             if let ibPath = findIBFile(forViewNamed: viewName, sourceFile: view.sourceLocation.file),
                let hierarchy = ibParser.extractHierarchy(from: ibPath, matchingCustomClass: viewName) {
                 return ibGen.generate(viewName: viewName, sourceFile: ibPath, root: hierarchy)
             }
 
-            // Empty UIKit shell — at least emits a root node so downstream tools don't 404.
+            // 2. Imperative walker — scan `viewDidLoad` / `loadView` / lazy var closures.
+            if let source = try? String(contentsOfFile: view.sourceLocation.file, encoding: .utf8),
+               let tree = ImperativeAnalyzer().analyze(source: source, fileName: view.sourceLocation.file, targetClass: viewName) {
+                return ImperativeAXIRGenerator().generate(from: tree, dataBindings: view.dataBindings)
+            }
+
+            // 3. Empty UIKit shell — at least emits a root node so downstream tools don't 404.
             let anchor = SourceAnchor(
                 file: view.sourceLocation.file,
                 line: view.sourceLocation.line,
